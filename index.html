@@ -9,18 +9,1284 @@
   <meta name="apple-mobile-web-app-title" content="PunchCard" />
   <title>PunchCard</title>
   <link rel="manifest" href="/manifest.json" />
-  <!-- Replace with your built CSS bundle after `npm run build` -->
-  <!-- <link rel="stylesheet" href="/static/css/main.abc123.css" /> -->
+  <link rel="apple-touch-icon" href="/icons/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #18160f; }
+    #root { min-height: 100vh; }
+  </style>
 </head>
 <body>
-  <noscript>PunchCard requires JavaScript.</noscript>
   <div id="root"></div>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useRef } = React;
 
-  <!-- Replace with your built JS bundle after `npm run build` -->
-  <!-- <script src="/static/js/main.abc123.js"></script> -->
+// ── Version ───────────────────────────────────────────────────
+const APP_VERSION = "1.0.0";
 
+// ── Constants ────────────────────────────────────────────────
+const STORAGE_KEY = "punchcard-v2";
+const REGULAR_START = 8 * 60;        // 8:00 AM in minutes
+const REGULAR_END   = 16.5 * 60;     // 4:30 PM in minutes
+const LUNCH_MIN     = 30;
+
+// ── Helpers ──────────────────────────────────────────────────
+const pad = (n) => String(n).padStart(2, "0");
+
+function nowMin() {
+  const d = new Date();
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+function isRegularTime(ts) {
+  const d = new Date(ts);
+  const min = d.getHours() * 60 + d.getMinutes();
+  return min >= REGULAR_START && min < REGULAR_END;
+}
+
+function fmtTime(ts) {
+  if (!ts) return "--:--";
+  const d = new Date(ts);
+  const h = d.getHours(), m = d.getMinutes();
+  const ampm = h >= 12 ? "PM" : "AM";
+  return `${pad(h % 12 || 12)}:${pad(m)} ${ampm}`;
+}
+
+function fmtHrs(ms) {
+  if (!ms || ms < 0) return "0h 00m";
+  const total = Math.floor(ms / 60000);
+  const h = Math.floor(total / 60), m = total % 60;
+  return `${h}h ${pad(m)}m`;
+}
+
+function fmtPay(hrs, rate) {
+  return (hrs * rate).toLocaleString("en-US", { style: "currency", currency: "USD" });
+}
+
+function shiftNetMs(shift) {
+  if (!shift.clockOut) return 0;
+  const raw = shift.clockOut - shift.clockIn;
+  const deduct = shift.type === "regular" ? LUNCH_MIN * 60000 : 0;
+  return Math.max(0, raw - deduct);
+}
+
+function shiftNetHrs(shift) {
+  return shiftNetMs(shift) / 3600000;
+}
+
+function weekStart(date = new Date()) {
+  const d = new Date(date);
+  const day = d.getDay(); // 0=Sun
+  d.setDate(d.getDate() - (day === 0 ? 6 : day - 1)); // Mon
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
+function sameDay(a, b) {
+  const da = new Date(a), db = new Date(b);
+  return da.getFullYear() === db.getFullYear() &&
+         da.getMonth() === db.getMonth() &&
+         da.getDate() === db.getDate();
+}
+
+function dayLabel(date) {
+  return new Date(date).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+}
+
+function fmtDateShort(date) {
+  return new Date(date).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+// Given a known anchor (start of any past pay period), find the current period's start
+function getPeriodStart(anchorStr, now = new Date()) {
+  const anchor = new Date(anchorStr);
+  anchor.setHours(0, 0, 0, 0);
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const diffDays = Math.floor((today - anchor) / 86400000);
+  const periodsElapsed = Math.floor(diffDays / 14);
+  const start = new Date(anchor);
+  start.setDate(anchor.getDate() + periodsElapsed * 14);
+  return start;
+}
+
+function getPeriodDays(anchorStr, now = new Date()) {
+  const start = getPeriodStart(anchorStr, now);
+  return Array.from({ length: 14 }, (_, i) => {
+    const d = new Date(start);
+    d.setDate(start.getDate() + i);
+    return d;
+  });
+}
+
+// ── Tax Engine (2025 rates) ───────────────────────────────────
+
+function applyBrackets(taxable, brackets) {
+  let tax = 0;
+  for (const [limit, rate, base] of brackets) {
+    if (taxable <= 0) break;
+    const prev = base;
+    if (taxable > (limit ?? Infinity)) {
+      // Not the top bracket — move on
+    } else {
+      // Taxable falls in this bracket
+      tax = prev + taxable * rate;
+      return tax;
+    }
+  }
+  // Top bracket
+  const top = brackets[brackets.length - 1];
+  return top[2] + taxable * top[1];
+}
+
+// Federal income tax — annualized income, after standard deduction
+const FED_BRACKETS = {
+  single: [
+    [11925,   0.10, 0],
+    [48475,   0.12, 1192.50],
+    [103350,  0.22, 5578.50],
+    [197300,  0.24, 17651.00],
+    [250525,  0.32, 40199.00],
+    [626350,  0.35, 57231.00],
+    [Infinity,0.37, 188769.75],
+  ],
+  married: [
+    [23850,   0.10, 0],
+    [96950,   0.12, 2385.00],
+    [206700,  0.22, 11157.00],
+    [394600,  0.24, 35302.00],
+    [501050,  0.32, 80398.00],
+    [751600,  0.35, 114462.00],
+    [Infinity,0.37, 202154.50],
+  ],
+};
+
+const FED_STD_DEDUCTION = { single: 15000, married: 30000 };
+
+function calcFederalTax(annualGross, filingStatus) {
+  const taxable = Math.max(0, annualGross - FED_STD_DEDUCTION[filingStatus]);
+  const brackets = FED_BRACKETS[filingStatus];
+  let prev = 0, tax = 0;
+  for (const [limit, rate, _base] of brackets) {
+    const cap = limit === Infinity ? taxable : Math.min(taxable, limit);
+    if (cap <= prev) continue;
+    tax += (cap - prev) * rate;
+    prev = cap;
+    if (taxable <= limit) break;
+  }
+  return tax;
+}
+
+// NJ state income tax — annualized, after NJ exemptions
+const NJ_BRACKETS = {
+  single: [
+    [20000,   0.014,  0],
+    [35000,   0.0175, 280],
+    [40000,   0.035,  542.50],
+    [75000,   0.05525,717.50],
+    [500000,  0.0637, 2650],
+    [1000000, 0.0897, 29737.50],
+    [Infinity,0.1075, 74637.50],
+  ],
+  married: [
+    [20000,   0.014,  0],
+    [50000,   0.0175, 280],
+    [70000,   0.0245, 805],
+    [80000,   0.035,  1295],
+    [150000,  0.05525,1645],
+    [500000,  0.0637, 5511.25],
+    [1000000, 0.0897, 27806.25],
+    [Infinity,0.1075, 72606.25],
+  ],
+};
+
+const NJ_EXEMPTION = { single: 1000, married: 2000 };
+
+function calcNJTax(annualGross, filingStatus) {
+  const taxable = Math.max(0, annualGross - NJ_EXEMPTION[filingStatus]);
+  const brackets = NJ_BRACKETS[filingStatus];
+  let prev = 0, tax = 0;
+  for (const [limit, rate, _base] of brackets) {
+    const cap = limit === Infinity ? taxable : Math.min(taxable, limit);
+    if (cap <= prev) continue;
+    tax += (cap - prev) * rate;
+    prev = cap;
+    if (taxable <= limit) break;
+  }
+  return tax;
+}
+
+// FICA 2025
+const SS_WAGE_BASE  = 176100;
+const NJ_SDI_BASE   = 161400;
+const NJ_SUI_BASE   = 42300;
+
+function calcPaycheck(grossPeriod, filingStatus, preTaxPerPeriod) {
+  const preTax     = Math.min(grossPeriod, preTaxPerPeriod); // 401k/health etc.
+  const ficaWages  = Math.max(0, grossPeriod - preTax);       // FICA uses pre-tax reduced
+  const annualFica = ficaWages * 26;
+  const annualGross = grossPeriod * 26;
+  const annualFedTaxable = Math.max(0, annualGross - preTaxPerPeriod * 26);
+
+  const ssAnnual       = Math.min(annualFica, SS_WAGE_BASE) * 0.062;
+  const medicareAnnual = annualFica * 0.0145;
+  const federalAnnual  = calcFederalTax(annualFedTaxable, filingStatus);
+  const njAnnual       = calcNJTax(annualFedTaxable, filingStatus);
+  const sdiAnnual      = Math.min(annualGross, NJ_SDI_BASE) * 0.0026;
+  const fliAnnual      = Math.min(annualGross, NJ_SDI_BASE) * 0.0009;
+  const suiAnnual      = Math.min(annualGross, NJ_SUI_BASE) * 0.00425;
+
+  // Per-period amounts
+  return {
+    gross:       grossPeriod,
+    preTax:      preTax,
+    taxableWages: ficaWages,
+    federal:     federalAnnual / 26,
+    ss:          ssAnnual / 26,
+    medicare:    medicareAnnual / 26,
+    njState:     njAnnual / 26,
+    njSDI:       sdiAnnual / 26,
+    njFLI:       fliAnnual / 26,
+    njSUI:       suiAnnual / 26,
+    get totalDeductions() {
+      return this.preTax + this.federal + this.ss + this.medicare +
+             this.njState + this.njSDI + this.njFLI + this.njSUI;
+    },
+    get netPay() { return this.gross - this.totalDeductions; },
+  };
+}
+
+// ── CSV Export ───────────────────────────────────────────────
+function exportCSV(shifts, settings) {
+  const rows = [
+    ["Date", "Day", "Type", "Clock In", "Clock Out", "Net Hours", "Gross Pay", "Note"],
+  ];
+  const sorted = [...shifts].sort((a, b) => a.clockIn - b.clockIn);
+  for (const s of sorted) {
+    const d = new Date(s.clockIn);
+    const hrs = shiftNetHrs(s);
+    const pay = hrs * (s.type === "regular" ? settings.regularRate : settings.oncallRate);
+    rows.push([
+      d.toLocaleDateString("en-US"),
+      d.toLocaleDateString("en-US", { weekday: "long" }),
+      s.type === "regular" ? "Regular" : "On-Call",
+      fmtTime(s.clockIn),
+      s.clockOut ? fmtTime(s.clockOut) : "OPEN",
+      hrs.toFixed(2),
+      pay.toFixed(2),
+      s.note || "",
+    ]);
+  }
+  // Totals row
+  const totalHrs = sorted.reduce((a, s) => a + shiftNetHrs(s), 0);
+  const totalPay = sorted.reduce((a, s) => {
+    return a + shiftNetHrs(s) * (s.type === "regular" ? settings.regularRate : settings.oncallRate);
+  }, 0);
+  rows.push(["TOTAL", "", "", "", "", totalHrs.toFixed(2), totalPay.toFixed(2), ""]);
+
+  const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement("a");
+  a.href = url;
+  a.download = `timesheet-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ── YTD helper ───────────────────────────────────────────────
+function getYTD(shifts, settings) {
+  const janFirst = new Date(new Date().getFullYear(), 0, 1).getTime();
+  const ytd = shifts.filter(s => s.clockIn >= janFirst && s.clockOut);
+  const regGross = ytd.filter(s => s.type === "regular").reduce((a, s) => a + shiftNetHrs(s) * settings.regularRate, 0);
+  const ocGross  = ytd.filter(s => s.type === "oncall").reduce((a, s)  => a + shiftNetHrs(s) * settings.oncallRate, 0);
+  const total    = regGross + ocGross;
+  return { regGross, ocGross, total };
+}
+
+// ── Default state ────────────────────────────────────────────
+// Default anchor: most recent Monday that aligns to a biweekly cycle from 2025-01-06
+const defaultAnchor = "2025-01-06";
+const defaultSettings = {
+  regularRate: 18, oncallRate: 27, periodAnchor: defaultAnchor,
+  filingStatus: "single", preTaxPerPeriod: 0,
+};
+
+// ── Main Component ───────────────────────────────────────────
+export default function PunchCard() {
+  const [shifts, setShifts]       = useState([]);
+  const [active, setActive]       = useState(null); // { id, type, clockIn }
+  const [settings, setSettings]   = useState(defaultSettings);
+  const [tab, setTab]             = useState("today");
+  const [now, setNow]             = useState(new Date());
+  const [editShift, setEditShift] = useState(null); // shift being edited
+  const [note, setNote]           = useState("");
+  const [flash, setFlash]         = useState(null); // "in" | "out"
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [rateInput, setRateInput]  = useState({ regularRate: "", oncallRate: "" });
+  const [anchorInput, setAnchorInput] = useState(defaultAnchor);
+  const [filingInput, setFilingInput]   = useState("single");
+  const [preTaxInput, setPreTaxInput]   = useState("0");
+  const [showPaystub, setShowPaystub]   = useState(false);
+  const [dismissedWarnings, setDismissedWarnings] = useState({});
+  const [viewingPeriodOffset, setViewingPeriodOffset] = useState(0); // 0 = current, -1 = prev, etc.
+  const loaded = useRef(false);
+
+  const [swWaiting, setSwWaiting]   = useState(false);
+  const swReg = useRef(null);
+
+  // Service Worker registration + update detection
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.register("/sw.js").then(reg => {
+      swReg.current = reg;
+      // Already waiting (user opened app after SW updated)
+      if (reg.waiting) setSwWaiting(true);
+      // New SW installed while app is open
+      reg.addEventListener("updatefound", () => {
+        const newWorker = reg.installing;
+        newWorker?.addEventListener("statechange", () => {
+          if (newWorker.statechange === "installed" && navigator.serviceWorker.controller) {
+            setSwWaiting(true);
+          }
+        });
+      });
+    }).catch(() => {});
+    // When SW activates after skipWaiting, reload
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      window.location.reload();
+    });
+  }, []);
+
+  function applyUpdate() {
+    swReg.current?.waiting?.postMessage({ type: "SKIP_WAITING" });
+    setSwWaiting(false);
+  }
+
+  // Clock tick
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Load
+  useEffect(() => {
+    async function load() {
+      try {
+        const r = await window.storage.get(STORAGE_KEY);
+        if (r?.value) {
+          const d = JSON.parse(r.value);
+          setShifts(d.shifts || []);
+          setActive(d.active || null);
+          setSettings(d.settings || defaultSettings);
+          setRateInput({
+            regularRate: String(d.settings?.regularRate ?? defaultSettings.regularRate),
+            oncallRate:  String(d.settings?.oncallRate  ?? defaultSettings.oncallRate),
+          });
+          setAnchorInput(d.settings?.periodAnchor ?? defaultAnchor);
+          setFilingInput(d.settings?.filingStatus ?? "single");
+          setPreTaxInput(String(d.settings?.preTaxPerPeriod ?? 0));
+        }
+      } catch {}
+      loaded.current = true;
+    }
+    load();
+  }, []);
+
+  // Save
+  async function persist(newShifts, newActive, newSettings) {
+    try {
+      await window.storage.set(STORAGE_KEY, JSON.stringify({
+        shifts: newShifts,
+        active: newActive,
+        settings: newSettings,
+      }));
+    } catch {}
+  }
+
+  function punch() {
+    const ts = Date.now();
+    if (!active) {
+      // Clock in
+      const type = isRegularTime(ts) ? "regular" : "oncall";
+      const newActive = { id: crypto.randomUUID(), type, clockIn: ts };
+      setActive(newActive);
+      setFlash("in");
+      setTimeout(() => setFlash(null), 800);
+      persist(shifts, newActive, settings);
+    } else {
+      // Clock out
+      const completed = { ...active, clockOut: ts, note: note.trim() };
+      const newShifts = [completed, ...shifts];
+      setShifts(newShifts);
+      setActive(null);
+      setNote("");
+      setFlash("out");
+      setTimeout(() => setFlash(null), 800);
+      persist(newShifts, null, settings);
+    }
+  }
+
+  function saveSettings() {
+    const reg = parseFloat(rateInput.regularRate);
+    const oc  = parseFloat(rateInput.oncallRate);
+    if (isNaN(reg) || isNaN(oc)) return;
+    const ns = {
+      regularRate: reg, oncallRate: oc,
+      periodAnchor: anchorInput || defaultAnchor,
+      filingStatus: filingInput,
+      preTaxPerPeriod: Math.max(0, parseFloat(preTaxInput) || 0),
+    };
+    setSettings(ns);
+    setSettingsOpen(false);
+    persist(shifts, active, ns);
+  }
+
+  function deleteShift(id) {
+    const updated = shifts.filter(s => s.id !== id);
+    setShifts(updated);
+    persist(updated, active, settings);
+  }
+
+  function saveEdit() {
+    if (!editShift) return;
+    const updated = shifts.map(s => s.id === editShift.id ? editShift : s);
+    setShifts(updated);
+    setEditShift(null);
+    persist(updated, active, settings);
+  }
+
+  // Derived
+  const todayShifts  = shifts.filter(s => sameDay(s.clockIn, now));
+  const todayReg     = todayShifts.filter(s => s.type === "regular");
+  const todayOC      = todayShifts.filter(s => s.type === "oncall");
+  const todayRegHrs  = todayReg.reduce((a, s) => a + shiftNetHrs(s), 0);
+  const todayOCHrs   = todayOC.reduce((a, s)  => a + shiftNetHrs(s), 0);
+  const todayRegPay  = fmtPay(todayRegHrs, settings.regularRate);
+  const todayOCPay   = fmtPay(todayOCHrs,  settings.oncallRate);
+
+  // Week hours (all types count toward FLSA 40h overtime)
+  const ws = weekStart();
+  const weekDays = Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(ws);
+    d.setDate(ws.getDate() + i);
+    return d;
+  });
+  const weekShifts   = shifts.filter(s => s.clockIn >= ws.getTime() && s.clockOut);
+  const weekTotalHrs = weekShifts.reduce((a, s) => a + shiftNetHrs(s), 0);
+  const otStatus     = weekTotalHrs >= 40 ? "over" : weekTotalHrs >= 35 ? "warn" : "ok";
+
+  // YTD
+  const ytd = getYTD(shifts, settings);
+
+  // Warnings
+  const warnings = [];
+  // Stale active shift (open > 10 hours)
+  if (active && (now - active.clockIn) > 10 * 3600000) {
+    warnings.push({ id: "stale", msg: `⚠ Open shift from ${fmtTime(active.clockIn)} — did you forget to clock out?`, color: "#c8860a", bg: "#3d2a00", border: "#c8860a" });
+  }
+  // Yesterday no punches (weekday only)
+  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1); yesterday.setHours(12, 0, 0, 0);
+  const yDay = yesterday.getDay();
+  if (yDay !== 0 && yDay !== 6) {
+    const yShifts = shifts.filter(s => sameDay(s.clockIn, yesterday));
+    if (yShifts.length === 0 && !sameDay(yesterday, new Date(shifts[0]?.clockIn || 0))) {
+      warnings.push({ id: `nopunch-${yesterday.toDateString()}`, msg: `⚠ No punches logged for ${yesterday.toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })}`, color: "#c8860a", bg: "#3d2a00", border: "#c8860a" });
+    }
+  }
+  // Overtime
+  if (weekTotalHrs > 40) {
+    const extra = weekTotalHrs - 40;
+    warnings.push({ id: `ot-${ws.toDateString()}`, msg: `⚠ ${fmtHrs(extra * 3600000)} over 40h this week — overtime may apply (FLSA)`, color: "#e07070", bg: "#3d1a1a", border: "#e07070" });
+  }
+  const activeWarnings = warnings.filter(w => !dismissedWarnings[w.id]);
+
+  const h = now.getHours(), m = now.getMinutes(), s = now.getSeconds();
+  const timeStr = `${pad(h % 12 || 12)}:${pad(m)}:${pad(s)} ${h >= 12 ? "PM" : "AM"}`;
+  const inRegular = nowMin() >= REGULAR_START && nowMin() < REGULAR_END;
+
+  const activeElapsed = active ? now - active.clockIn : 0;
+  const activeType = active?.type;
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#18160f", color: "#f0ead8", fontFamily: "'Courier Prime', 'Courier New', monospace", display: "flex", flexDirection: "column" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&family=Oswald:wght@400;600;700&display=swap');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        ::-webkit-scrollbar { width: 3px; }
+        ::-webkit-scrollbar-thumb { background: #3a3520; }
+
+        .card { background: #f5f0df; color: #1a1508; border-radius: 2px; }
+
+        .punch-btn {
+          width: 140px; height: 140px; border-radius: 50%;
+          border: 3px solid currentColor;
+          font-family: 'Oswald', sans-serif;
+          font-size: 22px; font-weight: 700; letter-spacing: 3px;
+          cursor: pointer;
+          transition: all 0.12s;
+          display: flex; align-items: center; justify-content: center;
+          flex-direction: column; gap: 4px;
+        }
+        .punch-btn.out-mode { background: #2d6a4f; color: #a8f0c6; border-color: #a8f0c6; }
+        .punch-btn.out-mode:hover { background: #3d8a6a; }
+        .punch-btn.in-mode  { background: #5c1a1a; color: #f0a8a8; border-color: #f0a8a8; }
+        .punch-btn.in-mode:hover  { background: #7a2020; }
+        .punch-btn.flash-in  { background: #a8f0c6 !important; color: #0d2a1a !important; }
+        .punch-btn.flash-out { background: #f0a8a8 !important; color: #2a0d0d !important; }
+
+        .tab-btn {
+          background: none; border: none; color: #6a6040; cursor: pointer;
+          font-family: 'Oswald', sans-serif; font-size: 13px; letter-spacing: 2px;
+          text-transform: uppercase; padding: 10px 16px;
+          border-bottom: 2px solid transparent; transition: all 0.15s;
+        }
+        .tab-btn.active { color: #d4b84a; border-bottom-color: #d4b84a; }
+        .tab-btn:hover:not(.active) { color: #a09060; }
+
+        .shift-row {
+          border-bottom: 1px solid #2a2510;
+          padding: 10px 0; display: flex; align-items: center; gap: 10px;
+        }
+        .badge {
+          font-size: 9px; letter-spacing: 2px; text-transform: uppercase;
+          padding: 2px 8px; border-radius: 1px; font-weight: 700;
+        }
+        .badge.regular { background: #1a3d2a; color: #5dba8a; }
+        .badge.oncall  { background: #3d1a1a; color: #e07070; }
+
+        .stat-box {
+          background: #221e10; border: 1px solid #3a3218;
+          padding: 14px 16px; flex: 1;
+        }
+        .stat-num {
+          font-family: 'Oswald', sans-serif; font-size: 26px;
+          font-weight: 600; letter-spacing: 1px;
+        }
+        .stat-lbl { font-size: 9px; letter-spacing: 2px; color: #6a5a30; text-transform: uppercase; margin-top: 2px; }
+
+        .action-btn {
+          background: none; border: 1px solid #3a3218; color: #6a5a30;
+          padding: 6px 14px; font-family: 'Courier Prime', monospace;
+          font-size: 11px; cursor: pointer; letter-spacing: 1px;
+          transition: all 0.12s;
+        }
+        .action-btn:hover { border-color: #d4b84a; color: #d4b84a; }
+        .action-btn.danger:hover { border-color: #e07070; color: #e07070; }
+
+        .settings-input {
+          background: #221e10; border: 1px solid #3a3218; color: #f0ead8;
+          font-family: 'Courier Prime', monospace; font-size: 15px;
+          padding: 8px 12px; width: 100%; outline: none;
+        }
+        .settings-input:focus { border-color: #d4b84a; }
+
+        .save-btn {
+          background: #d4b84a; color: #1a1508; border: none;
+          font-family: 'Oswald', sans-serif; font-size: 13px;
+          font-weight: 700; letter-spacing: 3px; text-transform: uppercase;
+          padding: 11px 32px; cursor: pointer; transition: background 0.12s;
+        }
+        .save-btn:hover { background: #e8d070; }
+
+        .week-day { border-bottom: 1px solid #2a2510; padding: 12px 0; }
+        .week-day.today-row { border-left: 3px solid #d4b84a; padding-left: 12px; }
+        .incomplete { color: #e07070; font-size: 10px; letter-spacing: 1px; }
+
+        .edit-input {
+          background: #221e10; border: 1px solid #d4b84a; color: #f0ead8;
+          font-family: 'Courier Prime', monospace; font-size: 13px;
+          padding: 4px 8px; outline: none; width: 100%;
+        }
+        .note-input {
+          background: transparent; border: none; border-bottom: 1px solid #3a3218;
+          color: #a09060; font-family: 'Courier Prime', monospace; font-size: 12px;
+          padding: 4px 0; outline: none; width: 100%;
+        }
+        .note-input::placeholder { color: #4a4020; }
+        .note-input:focus { border-bottom-color: #d4b84a; }
+
+        .overtime-warn {
+          background: #3d2a00; border: 1px solid #c8860a;
+          color: #f0b84a; font-size: 11px; letter-spacing: 1px;
+          padding: 8px 12px; margin-bottom: 12px;
+        }
+        .warning-banner {
+          padding: 9px 12px; margin-bottom: 10px;
+          font-size: 11px; letter-spacing: 1px; display: flex;
+          justify-content: space-between; align-items: center; gap: 8px;
+        }
+        .ot-bar-wrap { height: 6px; background: #221e10; border-radius: 3px; overflow: hidden; margin-top: 6px; }
+        .ot-bar { height: 100%; border-radius: 3px; transition: width 0.4s; }
+        .wage-bar-wrap { height: 4px; background: #221e10; border-radius: 2px; overflow: hidden; margin-top: 5px; }
+        .wage-bar { height: 100%; border-radius: 2px; transition: width 0.4s; }
+      `}</style>
+
+      {/* ── Update Banner ── */}
+      {swWaiting && (
+        <div style={{ background: "#1a3d2a", borderBottom: "1px solid #2d6a4f", padding: "10px 20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: "#5dba8a", letterSpacing: 1 }}>⬆ A new version is available</span>
+          <button onClick={applyUpdate} style={{ background: "#5dba8a", border: "none", color: "#0d2a1a", fontFamily: "'Oswald', sans-serif", fontSize: 11, letterSpacing: 2, padding: "5px 14px", cursor: "pointer", textTransform: "uppercase" }}>Update Now</button>
+        </div>
+      )}
+
+      {/* ── Header ── */}
+      <div style={{ background: "#0e0c07", borderBottom: "1px solid #2a2510", padding: "14px 20px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 18, fontWeight: 700, letterSpacing: 4, color: "#d4b84a", textTransform: "uppercase" }}>
+            ◈ PunchCard
+          </div>
+          <div style={{ fontSize: 10, color: "#4a4020", letterSpacing: 2, marginTop: 2 }}>
+            REGULAR 8:00 AM – 4:30 PM
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 9, color: "#3a3218", letterSpacing: 1 }}>v{APP_VERSION}</span>
+          <button
+          onClick={() => { setSettingsOpen(!settingsOpen); setRateInput({ regularRate: String(settings.regularRate), oncallRate: String(settings.oncallRate) }); }}
+          style={{ background: "none", border: "none", color: "#6a5a30", cursor: "pointer", fontSize: 20, lineHeight: 1 }}
+          title="Settings"
+        >⚙</button>
+        </div>
+      </div>
+
+      {/* ── Settings Panel ── */}
+      {settingsOpen && (
+        <div style={{ background: "#0e0c07", borderBottom: "1px solid #2a2510", padding: "20px" }}>
+          <div style={{ fontSize: 10, letterSpacing: 3, color: "#6a5a30", marginBottom: 16, textTransform: "uppercase" }}>Hourly Rates</div>
+          <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 9, color: "#6a5a30", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Regular (8–4:30)</div>
+              <input className="settings-input" value={rateInput.regularRate} onChange={e => setRateInput(p => ({ ...p, regularRate: e.target.value }))} placeholder="18.00" />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 9, color: "#6a5a30", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>On-Call / Emergency</div>
+              <input className="settings-input" value={rateInput.oncallRate} onChange={e => setRateInput(p => ({ ...p, oncallRate: e.target.value }))} placeholder="27.00" />
+            </div>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 9, color: "#6a5a30", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Pay Period Anchor Date</div>
+            <input type="date" className="settings-input" value={anchorInput} onChange={e => setAnchorInput(e.target.value)} />
+            <div style={{ fontSize: 9, color: "#4a4020", letterSpacing: 1, marginTop: 6 }}>First day of any known pay period — used to calculate all future periods</div>
+          </div>
+          <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 9, color: "#6a5a30", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Filing Status</div>
+              <select className="settings-input" value={filingInput} onChange={e => setFilingInput(e.target.value)}
+                style={{ appearance: "none", cursor: "pointer" }}>
+                <option value="single">Single</option>
+                <option value="married">Married (MFJ)</option>
+              </select>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 9, color: "#6a5a30", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Pre-Tax Deductions / Period</div>
+              <input className="settings-input" placeholder="0.00" value={preTaxInput} onChange={e => setPreTaxInput(e.target.value)} />
+              <div style={{ fontSize: 9, color: "#4a4020", marginTop: 4 }}>401k, health ins., FSA, etc.</div>
+            </div>
+          </div>
+          <div style={{ fontSize: 10, color: "#4a4020", letterSpacing: 1, marginBottom: 14 }}>30-min lunch auto-deducted from regular shifts</div>
+          <button className="save-btn" onClick={saveSettings}>Save Rates</button>
+        </div>
+      )}
+
+      {/* ── Tabs ── */}
+      <div style={{ background: "#0e0c07", borderBottom: "1px solid #2a2510", display: "flex" }}>
+        {["today", "week", "period", "log"].map(t => (
+          <button key={t} className={`tab-btn${tab === t ? " active" : ""}`} onClick={() => setTab(t)}>
+            {t === "today" ? "Today" : t === "week" ? "Week" : t === "period" ? "Pay Period" : "Log"}
+          </button>
+        ))}
+      </div>
+
+      <div style={{ flex: 1, overflowY: "auto", padding: "24px 20px", maxWidth: 540, width: "100%", margin: "0 auto" }}>
+
+        {/* ══════════ TODAY TAB ══════════ */}
+        {tab === "today" && (
+          <div>
+            {/* Warning banners */}
+            {activeWarnings.map(w => (
+              <div key={w.id} className="warning-banner" style={{ background: w.bg, border: `1px solid ${w.border}`, color: w.color }}>
+                <span>{w.msg}</span>
+                <button onClick={() => setDismissedWarnings(p => ({ ...p, [w.id]: true }))}
+                  style={{ background: "none", border: "none", color: w.color, cursor: "pointer", fontSize: 16, lineHeight: 1, flexShrink: 0 }}>×</button>
+              </div>
+            ))}
+
+            {/* Live clock */}
+            <div style={{ textAlign: "center", marginBottom: 8 }}>
+              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 42, fontWeight: 400, letterSpacing: 3, color: "#f0ead8", lineHeight: 1 }}>
+                {timeStr}
+              </div>
+              <div style={{ fontSize: 10, letterSpacing: 3, color: inRegular ? "#5dba8a" : "#e07070", marginTop: 6, textTransform: "uppercase" }}>
+                {inRegular ? "▲ Regular Hours" : "◆ On-Call Window"}
+              </div>
+            </div>
+
+            {/* Overtime warning */}
+            {todayRegHrs > 8 && (
+              <div className="overtime-warn">⚠ {fmtHrs((todayRegHrs - 8) * 3600000)} over 8-hour regular limit today</div>
+            )}
+
+            {/* Punch button */}
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", margin: "28px 0" }}>
+              {active && (
+                <div style={{ marginBottom: 16, textAlign: "center" }}>
+                  <div style={{ fontSize: 10, letterSpacing: 2, color: "#6a5a30", textTransform: "uppercase", marginBottom: 4 }}>
+                    Clocked in {fmtTime(active.clockIn)} · {fmtHrs(activeElapsed)} elapsed
+                  </div>
+                  <div style={{ fontSize: 9, color: activeType === "regular" ? "#5dba8a" : "#e07070", letterSpacing: 2, textTransform: "uppercase" }}>
+                    {activeType === "regular" ? "REGULAR SHIFT" : "ON-CALL SHIFT"}
+                  </div>
+                </div>
+              )}
+
+              <button
+                className={`punch-btn ${active ? "in-mode" : "out-mode"}${flash ? ` flash-${flash}` : ""}`}
+                onClick={punch}
+              >
+                <span>{active ? "CLOCK" : "CLOCK"}</span>
+                <span style={{ fontSize: 28, letterSpacing: 4 }}>{active ? "OUT" : "IN"}</span>
+              </button>
+
+              {active && (
+                <div style={{ marginTop: 16, width: "100%", maxWidth: 280 }}>
+                  <input
+                    className="note-input"
+                    placeholder="Note (optional)…"
+                    value={note}
+                    onChange={e => setNote(e.target.value)}
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Today stats */}
+            <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+              <div className="stat-box">
+                <div className="stat-num" style={{ color: "#5dba8a" }}>{fmtHrs(todayRegHrs * 3600000)}</div>
+                <div className="stat-lbl">Regular hrs</div>
+              </div>
+              <div className="stat-box">
+                <div className="stat-num" style={{ color: "#e07070" }}>{fmtHrs(todayOCHrs * 3600000)}</div>
+                <div className="stat-lbl">On-call hrs</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 10, marginBottom: 28 }}>
+              <div className="stat-box">
+                <div className="stat-num" style={{ color: "#d4b84a" }}>{todayRegPay}</div>
+                <div className="stat-lbl">Regular est.</div>
+              </div>
+              <div className="stat-box">
+                <div className="stat-num" style={{ color: "#d4b84a" }}>{todayOCPay}</div>
+                <div className="stat-lbl">On-call est.</div>
+              </div>
+            </div>
+
+            {/* Weekly overtime tracker */}
+            <div style={{ background: "#221e10", border: "1px solid #3a3218", padding: "12px 14px", marginBottom: 20 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, letterSpacing: 1, marginBottom: 4 }}>
+                <span style={{ color: "#6a5a30", textTransform: "uppercase", letterSpacing: 2 }}>Week Hours</span>
+                <span style={{ color: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a", fontFamily: "'Oswald', sans-serif", fontSize: 14 }}>
+                  {fmtHrs(weekTotalHrs * 3600000)} / 40h
+                  {otStatus === "over" && <span style={{ marginLeft: 6, fontSize: 10 }}>OT</span>}
+                </span>
+              </div>
+              <div className="ot-bar-wrap">
+                <div className="ot-bar" style={{
+                  width: `${Math.min(100, (weekTotalHrs / 40) * 100)}%`,
+                  background: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a",
+                }} />
+              </div>
+              {otStatus === "warn" && <div style={{ fontSize: 9, color: "#a08030", marginTop: 4, letterSpacing: 1 }}>{fmtHrs((40 - weekTotalHrs) * 3600000)} until overtime threshold</div>}
+            </div>
+
+            {/* Today's shifts */}
+            {todayShifts.length > 0 && (
+              <div>
+                <div style={{ fontSize: 9, letterSpacing: 3, color: "#4a4020", textTransform: "uppercase", marginBottom: 8 }}>Today's Shifts</div>
+                {todayShifts.map(shift => (
+                  <div key={shift.id} className="shift-row">
+                    <span className={`badge ${shift.type}`}>{shift.type === "regular" ? "REG" : "OC"}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13 }}>{fmtTime(shift.clockIn)} → {fmtTime(shift.clockOut)}</div>
+                      {shift.note && <div style={{ fontSize: 10, color: "#6a5a30", marginTop: 2 }}>{shift.note}</div>}
+                    </div>
+                    <div style={{ fontSize: 13, color: "#d4b84a", marginRight: 8 }}>{fmtHrs(shiftNetMs(shift))}</div>
+                    <button className="action-btn danger" onClick={() => deleteShift(shift.id)}>×</button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ══════════ WEEK TAB ══════════ */}
+        {tab === "week" && (
+          <div>
+            <div style={{ fontSize: 9, letterSpacing: 3, color: "#4a4020", textTransform: "uppercase", marginBottom: 16 }}>
+              Week of {ws.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+            </div>
+
+            {(() => {
+              let totalRegHrs = 0, totalOCHrs = 0;
+              const rows = weekDays.map(day => {
+                const dayShifts = shifts.filter(s => sameDay(s.clockIn, day));
+                const regHrs = dayShifts.filter(s => s.type === "regular").reduce((a, s) => a + shiftNetHrs(s), 0);
+                const ocHrs  = dayShifts.filter(s => s.type === "oncall").reduce((a, s)  => a + shiftNetHrs(s), 0);
+                totalRegHrs += regHrs;
+                totalOCHrs  += ocHrs;
+                const isToday = sameDay(day, now);
+                const hasOpen = isToday && active;
+                const isEmpty = dayShifts.length === 0 && !hasOpen;
+
+                return (
+                  <div key={day} className={`week-day${isToday ? " today-row" : ""}`}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: isToday ? "#d4b84a" : "#a09060", letterSpacing: 1 }}>
+                          {isToday ? "▶ " : ""}{dayLabel(day)}
+                        </div>
+                        {isEmpty && (
+                          <div style={{ fontSize: 10, color: "#3a3218", marginTop: 2 }}>No punches</div>
+                        )}
+                        {hasOpen && (
+                          <div className="incomplete">● Active shift</div>
+                        )}
+                        {dayShifts.map(s => (
+                          <div key={s.id} style={{ fontSize: 10, color: "#6a5a30", marginTop: 3, display: "flex", gap: 8, alignItems: "center" }}>
+                            <span className={`badge ${s.type}`} style={{ fontSize: 8 }}>{s.type === "regular" ? "R" : "OC"}</span>
+                            <span>{fmtTime(s.clockIn)} → {fmtTime(s.clockOut)}</span>
+                            {!s.clockOut && <span className="incomplete">OPEN</span>}
+                          </div>
+                        ))}
+                      </div>
+                      {!isEmpty && (
+                        <div style={{ textAlign: "right" }}>
+                          {regHrs > 0 && <div style={{ fontSize: 12, color: "#5dba8a" }}>{fmtHrs(regHrs * 3600000)}</div>}
+                          {ocHrs  > 0 && <div style={{ fontSize: 12, color: "#e07070" }}>{fmtHrs(ocHrs  * 3600000)}</div>}
+                          <div style={{ fontSize: 11, color: "#d4b84a", marginTop: 2 }}>
+                            {fmtPay(regHrs * settings.regularRate + ocHrs * settings.oncallRate > 0 ? 1 : 0, regHrs * settings.regularRate + ocHrs * settings.oncallRate)}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              });
+
+              return (
+                <>
+                  {rows}
+                  <div style={{ borderTop: "2px solid #3a3218", marginTop: 16, paddingTop: 16 }}>
+                    {/* OT bar */}
+                    <div style={{ marginBottom: 14 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, letterSpacing: 1, marginBottom: 4 }}>
+                        <span style={{ color: "#6a5a30", textTransform: "uppercase", letterSpacing: 2 }}>FLSA Overtime Threshold</span>
+                        <span style={{ color: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a", fontFamily: "'Oswald', sans-serif", fontSize: 13 }}>
+                          {fmtHrs(totalRegHrs * 3600000)} + {fmtHrs(totalOCHrs * 3600000)} = {fmtHrs((totalRegHrs + totalOCHrs) * 3600000)} / 40h
+                        </span>
+                      </div>
+                      <div className="ot-bar-wrap">
+                        <div className="ot-bar" style={{ width: `${Math.min(100, ((totalRegHrs + totalOCHrs) / 40) * 100)}%`, background: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a" }} />
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 10 }}>
+                      <div className="stat-box">
+                        <div className="stat-num" style={{ color: "#5dba8a" }}>{fmtHrs(totalRegHrs * 3600000)}</div>
+                        <div className="stat-lbl">Week Regular</div>
+                      </div>
+                      <div className="stat-box">
+                        <div className="stat-num" style={{ color: "#e07070" }}>{fmtHrs(totalOCHrs * 3600000)}</div>
+                        <div className="stat-lbl">Week On-Call</div>
+                      </div>
+                    </div>
+                    <div style={{ marginTop: 10 }} className="stat-box">
+                      <div className="stat-num" style={{ color: "#d4b84a" }}>
+                        {fmtPay(totalRegHrs, settings.regularRate)} + {fmtPay(totalOCHrs, settings.oncallRate)}
+                      </div>
+                      <div className="stat-lbl">Estimated Week Pay (Reg + On-Call)</div>
+                    </div>
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* ══════════ PAY PERIOD TAB ══════════ */}
+        {tab === "period" && (() => {
+          const anchor = settings.periodAnchor || defaultAnchor;
+          // Offset the anchor by viewingPeriodOffset * 14 days
+          const offsetAnchor = new Date(anchor);
+          offsetAnchor.setDate(offsetAnchor.getDate() + viewingPeriodOffset * 14);
+          // Find period start for that offset anchor relative to now (or just use anchor directly if offset)
+          const periodStart = viewingPeriodOffset === 0
+            ? getPeriodStart(anchor, now)
+            : (() => {
+                const base = getPeriodStart(anchor, now);
+                const s = new Date(base);
+                s.setDate(base.getDate() + viewingPeriodOffset * 14);
+                return s;
+              })();
+          const periodEnd = new Date(periodStart);
+          periodEnd.setDate(periodStart.getDate() + 13);
+          const periodDays = Array.from({ length: 14 }, (_, i) => {
+            const d = new Date(periodStart);
+            d.setDate(periodStart.getDate() + i);
+            return d;
+          });
+
+          const today0 = new Date(now); today0.setHours(0,0,0,0);
+          const daysElapsed = Math.min(14, Math.max(0, Math.floor((today0 - periodStart) / 86400000) + 1));
+          const isCurrentPeriod = viewingPeriodOffset === 0;
+          const isFuturePeriod = viewingPeriodOffset > 0;
+
+          let totalRegHrs = 0, totalOCHrs = 0;
+          const dayRows = periodDays.map(day => {
+            const dayShifts = shifts.filter(s => sameDay(s.clockIn, day));
+            const regHrs = dayShifts.filter(s => s.type === "regular").reduce((a, s) => a + shiftNetHrs(s), 0);
+            const ocHrs  = dayShifts.filter(s => s.type === "oncall").reduce((a, s)  => a + shiftNetHrs(s), 0);
+            totalRegHrs += regHrs;
+            totalOCHrs  += ocHrs;
+            const isToday = sameDay(day, now);
+            const isPast  = day < today0 && !isToday;
+            const isFuture = day > today0;
+            const hasOpen = isToday && active;
+            const isEmpty = dayShifts.length === 0 && !hasOpen;
+            const isWeekend = day.getDay() === 0 || day.getDay() === 6;
+
+            return (
+              <div key={day.toDateString()}
+                style={{
+                  borderBottom: "1px solid #2a2510",
+                  padding: "9px 0",
+                  borderLeft: isToday ? "3px solid #d4b84a" : isWeekend ? "3px solid #2a2510" : "3px solid transparent",
+                  paddingLeft: (isToday || isWeekend) ? 10 : 0,
+                  opacity: isFuture ? 0.35 : 1,
+                }}
+              >
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: isToday ? "#d4b84a" : isWeekend ? "#4a4020" : "#a09060", letterSpacing: 1 }}>
+                      {isToday ? "▶ " : ""}{dayLabel(day)}{isWeekend ? " ·" : ""}
+                    </div>
+                    {isEmpty && !isFuture && (
+                      <div style={{ fontSize: 9, color: isPast && !isWeekend ? "#5c1a1a" : "#3a3218", letterSpacing: 1 }}>
+                        {isPast && !isWeekend ? "⚠ no punch" : "—"}
+                      </div>
+                    )}
+                    {hasOpen && <div className="incomplete" style={{ fontSize: 9 }}>● Active</div>}
+                    {dayShifts.map(s => (
+                      <div key={s.id} style={{ fontSize: 9, color: "#6a5a30", marginTop: 2, display: "flex", gap: 6, alignItems: "center" }}>
+                        <span className={`badge ${s.type}`} style={{ fontSize: 7, padding: "1px 5px" }}>{s.type === "regular" ? "R" : "OC"}</span>
+                        <span>{fmtTime(s.clockIn)} → {fmtTime(s.clockOut)}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {!isEmpty && (
+                    <div style={{ textAlign: "right" }}>
+                      {regHrs > 0 && <div style={{ fontSize: 11, color: "#5dba8a" }}>{fmtHrs(regHrs * 3600000)}</div>}
+                      {ocHrs  > 0 && <div style={{ fontSize: 11, color: "#e07070" }}>{fmtHrs(ocHrs  * 3600000)}</div>}
+                      <div style={{ fontSize: 10, color: "#d4b84a" }}>
+                        {fmtPay(regHrs, settings.regularRate) !== "$0.00" || fmtPay(ocHrs, settings.oncallRate) !== "$0.00"
+                          ? (regHrs > 0 && ocHrs > 0
+                              ? `${fmtPay(regHrs, settings.regularRate)} + ${fmtPay(ocHrs, settings.oncallRate)}`
+                              : regHrs > 0 ? fmtPay(regHrs, settings.regularRate) : fmtPay(ocHrs, settings.oncallRate))
+                          : ""}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          });
+
+          const totalPay = totalRegHrs * settings.regularRate + totalOCHrs * settings.oncallRate;
+          // Projected pay (if current period, project based on daily average so far)
+          const workdaysSoFar = periodDays.slice(0, daysElapsed).filter(d => d.getDay() !== 0 && d.getDay() !== 6).length;
+          const workdaysTotal = periodDays.filter(d => d.getDay() !== 0 && d.getDay() !== 6).length;
+          const projectedPay = isCurrentPeriod && workdaysSoFar > 0
+            ? (totalPay / workdaysSoFar) * workdaysTotal
+            : null;
+
+          const progressPct = isCurrentPeriod ? Math.min(100, (daysElapsed / 14) * 100) : (viewingPeriodOffset < 0 ? 100 : 0);
+
+          return (
+            <div>
+              {/* Period nav */}
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+                <button className="action-btn" onClick={() => setViewingPeriodOffset(v => v - 1)}>◀ Prev</button>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: 10, letterSpacing: 2, color: "#d4b84a", textTransform: "uppercase" }}>
+                    {isCurrentPeriod ? "Current Period" : isFuturePeriod ? "Future Period" : `${Math.abs(viewingPeriodOffset)} Period${Math.abs(viewingPeriodOffset) > 1 ? "s" : ""} Ago`}
+                  </div>
+                  <div style={{ fontSize: 12, color: "#a09060", marginTop: 2 }}>
+                    {fmtDateShort(periodStart)} – {fmtDateShort(periodEnd)}
+                  </div>
+                </div>
+                <button className="action-btn" onClick={() => setViewingPeriodOffset(v => v + 1)} disabled={viewingPeriodOffset >= 0} style={{ opacity: viewingPeriodOffset >= 0 ? 0.3 : 1 }}>Next ▶</button>
+              </div>
+
+              {/* Progress bar */}
+              {isCurrentPeriod && (
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", fontSize: 9, color: "#4a4020", letterSpacing: 1, marginBottom: 5, textTransform: "uppercase" }}>
+                    <span>Day {daysElapsed} of 14</span>
+                    <span>{14 - daysElapsed} days remaining</span>
+                  </div>
+                  <div style={{ height: 4, background: "#221e10", borderRadius: 2 }}>
+                    <div style={{ height: "100%", width: `${progressPct}%`, background: "#d4b84a", borderRadius: 2, transition: "width 0.5s" }} />
+                  </div>
+                </div>
+              )}
+
+              {/* Summary stats */}
+              <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+                <div className="stat-box">
+                  <div className="stat-num" style={{ color: "#5dba8a" }}>{fmtHrs(totalRegHrs * 3600000)}</div>
+                  <div className="stat-lbl">Regular Hrs</div>
+                </div>
+                <div className="stat-box">
+                  <div className="stat-num" style={{ color: "#e07070" }}>{fmtHrs(totalOCHrs * 3600000)}</div>
+                  <div className="stat-lbl">On-Call Hrs</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+                <div className="stat-box">
+                  <div className="stat-num" style={{ color: "#d4b84a", fontSize: 20 }}>{fmtPay(totalRegHrs, settings.regularRate)}</div>
+                  <div className="stat-lbl">Regular Pay</div>
+                </div>
+                <div className="stat-box">
+                  <div className="stat-num" style={{ color: "#d4b84a", fontSize: 20 }}>{fmtPay(totalOCHrs, settings.oncallRate)}</div>
+                  <div className="stat-lbl">On-Call Pay</div>
+                </div>
+              </div>
+              <div className="stat-box" style={{ marginBottom: 20 }}>
+                <div className="stat-num" style={{ color: "#d4b84a" }}>{fmtPay(totalPay, 1)}</div>
+                <div className="stat-lbl">Total Earned This Period</div>
+                {projectedPay !== null && projectedPay > totalPay && (
+                  <div style={{ fontSize: 11, color: "#6a5a30", marginTop: 6 }}>
+                    Projected: ~{fmtPay(projectedPay, 1)} based on {workdaysSoFar} workday{workdaysSoFar !== 1 ? "s" : ""} so far
+                  </div>
+                )}
+              </div>
+
+              {/* ── YTD + Wage Base Countdowns ── */}
+              <div style={{ marginBottom: 20 }}>
+                <button
+                  onClick={() => setDismissedWarnings(p => ({ ...p, ytdOpen: !p.ytdOpen }))}
+                  style={{ width: "100%", background: "#221e10", border: "1px solid #3a3218", color: "#a09060", fontFamily: "'Oswald', sans-serif", fontSize: 12, letterSpacing: 3, textTransform: "uppercase", padding: "11px 16px", cursor: "pointer", textAlign: "left", display: "flex", justifyContent: "space-between" }}
+                >
+                  <span>📊 YTD Earnings & Wage Base Caps</span>
+                  <span>{dismissedWarnings.ytdOpen ? "▲" : "▼"}</span>
+                </button>
+                {dismissedWarnings.ytdOpen && (
+                  <div style={{ background: "#0e0c07", border: "1px solid #3a3218", borderTop: "none", padding: "14px 16px" }}>
+                    <div style={{ fontSize: 9, color: "#4a4020", letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>Year {new Date().getFullYear()} to date</div>
+                    <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+                      <div className="stat-box" style={{ flex: 1 }}>
+                        <div className="stat-num" style={{ color: "#5dba8a", fontSize: 18 }}>{fmtPay(ytd.regGross, 1)}</div>
+                        <div className="stat-lbl">YTD Regular</div>
+                      </div>
+                      <div className="stat-box" style={{ flex: 1 }}>
+                        <div className="stat-num" style={{ color: "#e07070", fontSize: 18 }}>{fmtPay(ytd.ocGross, 1)}</div>
+                        <div className="stat-lbl">YTD On-Call</div>
+                      </div>
+                    </div>
+                    <div className="stat-box" style={{ marginBottom: 20 }}>
+                      <div className="stat-num" style={{ color: "#d4b84a", fontSize: 22 }}>{fmtPay(ytd.total, 1)}</div>
+                      <div className="stat-lbl">YTD Total Gross</div>
+                    </div>
+
+                    {/* Wage base caps */}
+                    {[
+                      { label: "Social Security (6.2%)", cap: SS_WAGE_BASE, desc: "Tax stops at cap — take-home increases" },
+                      { label: "NJ SDI (0.26%)", cap: NJ_SDI_BASE, desc: "NJ disability insurance deduction stops" },
+                      { label: "NJ SUI/WF (0.425%)", cap: NJ_SUI_BASE, desc: "Unemployment / workforce tax stops" },
+                    ].map(({ label, cap, desc }) => {
+                      const pct = Math.min(100, (ytd.total / cap) * 100);
+                      const remaining = Math.max(0, cap - ytd.total);
+                      const hit = ytd.total >= cap;
+                      return (
+                        <div key={label} style={{ marginBottom: 14 }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, marginBottom: 3 }}>
+                            <span style={{ color: hit ? "#5dba8a" : "#6a5a30", letterSpacing: 1 }}>{label}</span>
+                            <span style={{ color: hit ? "#5dba8a" : "#a09060", fontFamily: "'Oswald', sans-serif" }}>
+                              {hit ? "✓ CAP HIT" : `${fmtPay(remaining, 1)} to cap`}
+                            </span>
+                          </div>
+                          <div className="wage-bar-wrap">
+                            <div className="wage-bar" style={{ width: `${pct}%`, background: hit ? "#5dba8a" : pct > 75 ? "#d4b84a" : "#3a5a3a" }} />
+                          </div>
+                          <div style={{ fontSize: 9, color: "#3a3218", marginTop: 3, letterSpacing: 1 }}>
+                            {fmtPay(ytd.total, 1)} / {fmtPay(cap, 1)} cap · {hit ? desc : `${pct.toFixed(0)}%`}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* ── Net Pay Estimate ── */}
+              {totalPay > 0 && (() => {
+                const pc = calcPaycheck(totalPay, settings.filingStatus || "single", settings.preTaxPerPeriod || 0);
+                const projPc = projectedPay ? calcPaycheck(projectedPay, settings.filingStatus || "single", settings.preTaxPerPeriod || 0) : null;
+                const row = (label, amount, color = "#a09060", bold = false) => (
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #2a2510", fontSize: bold ? 14 : 12 }}>
+                    <span style={{ color: "#6a5a30", letterSpacing: 1 }}>{label}</span>
+                    <span style={{ color, fontWeight: bold ? 700 : 400 }}>{typeof amount === "number" ? fmtPay(amount, 1) : amount}</span>
+                  </div>
+                );
+                return (
+                  <div style={{ marginBottom: 20 }}>
+                    <button
+                      onClick={() => setShowPaystub(p => !p)}
+                      style={{ width: "100%", background: "#221e10", border: "1px solid #3a3218", color: "#d4b84a", fontFamily: "'Oswald', sans-serif", fontSize: 12, letterSpacing: 3, textTransform: "uppercase", padding: "11px 16px", cursor: "pointer", textAlign: "left", display: "flex", justifyContent: "space-between" }}
+                    >
+                      <span>💵 Est. Paycheck After Deductions</span>
+                      <span>{showPaystub ? "▲" : "▼"}</span>
+                    </button>
+                    {showPaystub && (
+                      <div style={{ background: "#0e0c07", border: "1px solid #3a3218", borderTop: "none", padding: "0 16px 4px" }}>
+                        <div style={{ fontSize: 9, letterSpacing: 2, color: "#4a4020", textTransform: "uppercase", padding: "12px 0 4px" }}>
+                          {(settings.filingStatus === "married" ? "MFJ" : "Single")} · NJ · 2025 estimates · {isCurrentPeriod ? `${workdaysSoFar} workdays logged` : "full period"}
+                        </div>
+
+                        {row("Gross Pay", pc.gross, "#f0ead8", false)}
+                        {pc.preTax > 0 && row("Pre-Tax Deductions", -pc.preTax, "#e07070")}
+                        {row("Federal Withholding", -pc.federal, "#e07070")}
+                        {row("Social Security (6.2%)", -pc.ss, "#e07070")}
+                        {row("Medicare (1.45%)", -pc.medicare, "#e07070")}
+
+                        <div style={{ fontSize: 9, letterSpacing: 2, color: "#4a4020", textTransform: "uppercase", padding: "10px 0 4px" }}>NJ State</div>
+                        {row("NJ Income Tax", -pc.njState, "#e07070")}
+                        {row("NJ SDI (0.26%)", -pc.njSDI, "#c06050")}
+                        {row("NJ FLI (0.09%)", -pc.njFLI, "#c06050")}
+                        {row("NJ SUI/WF (0.425%)", -pc.njSUI, "#c06050")}
+
+                        <div style={{ borderTop: "2px solid #3a3218", marginTop: 4, padding: "12px 0" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 13, letterSpacing: 3, color: "#5dba8a", textTransform: "uppercase" }}>Est. Net Pay</span>
+                            <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 28, color: "#5dba8a", fontWeight: 700 }}>{fmtPay(Math.max(0, pc.netPay), 1)}</span>
+                          </div>
+                          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 10, color: "#4a4020" }}>
+                            <span>Effective tax rate</span>
+                            <span>{pc.gross > 0 ? ((pc.totalDeductions - pc.preTax) / pc.gross * 100).toFixed(1) : 0}%</span>
+                          </div>
+                          {projPc && projPc.gross > pc.gross && (
+                            <div style={{ marginTop: 10, padding: "8px 10px", background: "#221e10", border: "1px solid #3a3218", fontSize: 11, color: "#6a5a30", display: "flex", justifyContent: "space-between" }}>
+                              <span>Projected net (full period)</span>
+                              <span style={{ color: "#a09060" }}>~{fmtPay(Math.max(0, projPc.netPay), 1)}</span>
+                            </div>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 9, color: "#3a3218", paddingBottom: 10, lineHeight: 1.6 }}>
+                          * Estimates only. Based on annualized gross × 26. Does not account for YTD wage base limits, additional W-4 adjustments, or employer benefits. Consult your paystub or HR for exact figures.
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* Day-by-day */}
+              <div style={{ fontSize: 9, letterSpacing: 3, color: "#4a4020", textTransform: "uppercase", marginBottom: 8 }}>Daily Breakdown</div>
+              {dayRows}
+            </div>
+          );
+        })()}
+
+        {/* ══════════ LOG TAB ══════════ */}
+        {tab === "log" && (
+          <div>
+            {shifts.length > 0 && (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                <div style={{ fontSize: 9, color: "#4a4020", letterSpacing: 2, textTransform: "uppercase" }}>{shifts.length} shift{shifts.length !== 1 ? "s" : ""} total</div>
+                <button className="action-btn" style={{ borderColor: "#d4b84a", color: "#d4b84a" }}
+                  onClick={() => exportCSV(shifts, settings)}>
+                  ↓ Export CSV
+                </button>
+              </div>
+            )}
+
+            {active && (
+              <div style={{ background: "#1a3d2a", border: "1px solid #2d6a4f", padding: "10px 14px", marginBottom: 16, fontSize: 12, color: "#5dba8a" }}>
+                ● Active shift in progress since {fmtTime(active.clockIn)}
+              </div>
+            )}
+
+            {shifts.length === 0 && (
+              <div style={{ color: "#3a3218", fontSize: 12, letterSpacing: 2, textTransform: "uppercase", textAlign: "center", marginTop: 60 }}>No shifts logged yet</div>
+            )}
+
+            {editShift && (
+              <div style={{ background: "#221e10", border: "1px solid #d4b84a", padding: 16, marginBottom: 16 }}>
+                <div style={{ fontSize: 9, color: "#d4b84a", letterSpacing: 2, marginBottom: 12, textTransform: "uppercase" }}>Edit Shift</div>
+                <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 9, color: "#6a5a30", marginBottom: 4, letterSpacing: 1 }}>CLOCK IN</div>
+                    <input type="datetime-local" className="edit-input"
+                      value={new Date(editShift.clockIn - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}
+                      onChange={e => setEditShift(p => ({ ...p, clockIn: new Date(e.target.value).getTime() }))}
+                    />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 9, color: "#6a5a30", marginBottom: 4, letterSpacing: 1 }}>CLOCK OUT</div>
+                    <input type="datetime-local" className="edit-input"
+                      value={editShift.clockOut ? new Date(editShift.clockOut - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ""}
+                      onChange={e => setEditShift(p => ({ ...p, clockOut: e.target.value ? new Date(e.target.value).getTime() : null }))}
+                    />
+                  </div>
+                </div>
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ fontSize: 9, color: "#6a5a30", marginBottom: 4, letterSpacing: 1 }}>NOTE</div>
+                  <input className="edit-input" value={editShift.note || ""} onChange={e => setEditShift(p => ({ ...p, note: e.target.value }))} placeholder="Optional note…" />
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button className="save-btn" style={{ fontSize: 11, padding: "8px 20px" }} onClick={saveEdit}>Save</button>
+                  <button className="action-btn" onClick={() => setEditShift(null)}>Cancel</button>
+                </div>
+              </div>
+            )}
+
+            {shifts.map(shift => (
+              <div key={shift.id} className="shift-row">
+                <span className={`badge ${shift.type}`}>{shift.type === "regular" ? "REG" : "ON-CALL"}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12 }}>
+                    {new Date(shift.clockIn).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                  </div>
+                  <div style={{ fontSize: 11, color: "#6a5a30", marginTop: 2 }}>
+                    {fmtTime(shift.clockIn)} → {shift.clockOut ? fmtTime(shift.clockOut) : <span className="incomplete">OPEN</span>}
+                    {shift.type === "regular" && shift.clockOut && <span style={{ color: "#4a4020" }}> (−30m lunch)</span>}
+                  </div>
+                  {shift.note && <div style={{ fontSize: 10, color: "#5a4a20", marginTop: 2 }}>{shift.note}</div>}
+                </div>
+                <div style={{ textAlign: "right", marginRight: 8 }}>
+                  <div style={{ fontSize: 13, color: "#d4b84a" }}>{fmtHrs(shiftNetMs(shift))}</div>
+                  <div style={{ fontSize: 10, color: "#6a5a30" }}>{fmtPay(shiftNetHrs(shift), shift.type === "regular" ? settings.regularRate : settings.oncallRate)}</div>
+                </div>
+                <button className="action-btn" style={{ marginRight: 4 }} onClick={() => setEditShift({ ...shift })}>✎</button>
+                <button className="action-btn danger" onClick={() => deleteShift(shift.id)}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(React.createElement(PunchCard));
+  </script>
   <script>
-    // Register service worker
     if ("serviceWorker" in navigator) {
       window.addEventListener("load", () => {
         navigator.serviceWorker.register("/sw.js")
