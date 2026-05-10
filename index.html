@@ -322,7 +322,7 @@ function exportCSV(shifts, settings) {
     rows.push([
       d.toLocaleDateString("en-US"),
       d.toLocaleDateString("en-US", { weekday: "long" }),
-      s.type === "regular" ? "Regular" : "On-Call",
+      s.type === "regular" ? "Regular" : "Overtime",
       fmtTime(s.clockIn),
       s.clockOut ? fmtTime(s.clockOut) : "OPEN",
       hrs.toFixed(2),
@@ -627,7 +627,7 @@ function PunchCard() {
       shiftRows.push([
         d.toLocaleDateString("en-US"),
         d.toLocaleDateString("en-US", { weekday: "long" }),
-        s.type === "regular" ? "Regular" : "On-Call",
+        s.type === "regular" ? "Regular" : "Overtime",
         fmtTime(s.clockIn),
         s.clockOut ? fmtTime(s.clockOut) : "OPEN",
         grossHrs, lunchHrs,
@@ -653,7 +653,7 @@ function PunchCard() {
       if (s.type === "regular") { weekMap[key].regHrs += hrs; weekMap[key].regPay += hrs * settings.regularRate; }
       else                      { weekMap[key].ocHrs  += hrs; weekMap[key].ocPay  += hrs * settings.oncallRate;  }
     }
-    const weekRows = [["Week Starting","Regular Hrs","On-Call Hrs","Total Hrs","Regular Pay","On-Call Pay","Total Pay","OT Flag"]];
+    const weekRows = [["Week Starting","Regular Hrs","Overtime Hrs","Total Hrs","Regular Pay","Overtime Pay","Total Pay","OT Flag"]];
     for (const [key, v] of Object.entries(weekMap)) {
       const tot = v.regHrs + v.ocHrs;
       weekRows.push([key, v.regHrs.toFixed(2), v.ocHrs.toFixed(2), tot.toFixed(2),
@@ -667,11 +667,11 @@ function PunchCard() {
     const ytdRows = [
       ["Metric","Value"],
       ["YTD Regular Gross", `$${ytd.regGross.toFixed(2)}`],
-      ["YTD On-Call Gross", `$${ytd.ocGross.toFixed(2)}`],
+      ["YTD Overtime Gross", `$${ytd.ocGross.toFixed(2)}`],
       ["YTD Total Gross",   `$${ytd.total.toFixed(2)}`],
       ["",""],
       ["Regular Hourly Rate",  `$${settings.regularRate}`],
-      ["On-Call Hourly Rate",  `$${settings.oncallRate}`],
+      ["Overtime Hourly Rate",  `$${settings.oncallRate}`],
       ["Regular Hours",        `${(settings.regularStart||"08:00")} – ${(settings.regularEnd||"16:30")}`],
       ["Filing Status",        settings.filingStatus === "married" ? "Married (MFJ)" : "Single"],
       ["Pre-Tax Deductions/Period", `$${settings.preTaxPerPeriod || 0}`],
@@ -927,7 +927,7 @@ function PunchCard() {
               <input className="settings-input" value={rateInput.regularRate} onChange={e => setRateInput(p => ({ ...p, regularRate: e.target.value }))} placeholder="18.00" />
             </div>
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 9, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>On-Call / Emergency</div>
+              <div style={{ fontSize: 9, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Overtime / Emergency</div>
               <input className="settings-input" value={rateInput.oncallRate} onChange={e => setRateInput(p => ({ ...p, oncallRate: e.target.value }))} placeholder="27.00" />
             </div>
           </div>
@@ -1008,7 +1008,7 @@ function PunchCard() {
                 {timeStr}
               </div>
               <div style={{ fontSize: 10, letterSpacing: 3, color: inRegular ? "#5dba8a" : "#e07070", marginTop: 6, textTransform: "uppercase" }}>
-                {inRegular ? "▲ Regular Hours" : "◆ On-Call Window"}
+                {inRegular ? "▲ Regular Hours" : "◆ Overtime Window"}
               </div>
             </div>
 
@@ -1041,7 +1041,7 @@ function PunchCard() {
                     </div>
                   )}
                   <div style={{ fontSize: 9, color: activeType === "regular" ? "#5dba8a" : "#e07070", letterSpacing: 2, textTransform: "uppercase", marginBottom: active.type === "regular" ? 12 : 0 }}>
-                    {activeType === "regular" ? "REGULAR SHIFT" : "ON-CALL SHIFT"}
+                    {activeType === "regular" ? "REGULAR SHIFT" : "Overtime SHIFT"}
                   </div>
                   {/* Lunch button — regular shifts only */}
                   {active.type === "regular" && !active.onLunch && (
@@ -1097,7 +1097,7 @@ function PunchCard() {
               </div>
               <div className="stat-box">
                 <div className="stat-num" style={{ color: "#e07070" }}>{fmtHrs(todayOCHrs * 3600000)}</div>
-                <div className="stat-lbl">On-call hrs</div>
+                <div className="stat-lbl">Overtime hrs</div>
               </div>
             </div>
             <div style={{ display: "flex", gap: 10, marginBottom: 28 }}>
@@ -1107,7 +1107,7 @@ function PunchCard() {
               </div>
               <div className="stat-box">
                 <div className="stat-num" style={{ color: "#d4b84a" }}>{todayOCPay}</div>
-                <div className="stat-lbl">On-call est.</div>
+                <div className="stat-lbl">Overtime est.</div>
               </div>
             </div>
 
@@ -1187,7 +1187,7 @@ function PunchCard() {
                       <button className={`type-btn${manualEntry.type === "regular" ? " active-reg" : ""}`}
                         onClick={() => setManualEntry(p => ({ ...p, type: "regular" }))}>Regular</button>
                       <button className={`type-btn${manualEntry.type === "oncall" ? " active-oc" : ""}`}
-                        onClick={() => setManualEntry(p => ({ ...p, type: "oncall" }))}>On-Call</button>
+                        onClick={() => setManualEntry(p => ({ ...p, type: "oncall" }))}>Overtime</button>
                     </div>
                   </div>
                   <div style={{ marginBottom: 14 }}>
@@ -1311,14 +1311,14 @@ function PunchCard() {
                       </div>
                       <div className="stat-box">
                         <div className="stat-num" style={{ color: "#e07070" }}>{fmtHrs(totalOCHrs * 3600000)}</div>
-                        <div className="stat-lbl">Week On-Call</div>
+                        <div className="stat-lbl">Week Overtime</div>
                       </div>
                     </div>
                     <div style={{ marginTop: 10 }} className="stat-box">
                       <div className="stat-num" style={{ color: "#d4b84a" }}>
                         {fmtPay(totalRegHrs, settings.regularRate)} + {fmtPay(totalOCHrs, settings.oncallRate)}
                       </div>
-                      <div className="stat-lbl">Estimated Week Pay (Reg + On-Call)</div>
+                      <div className="stat-lbl">Estimated Week Pay (Reg + Overtime)</div>
                     </div>
                   </div>
                 </>
@@ -1462,7 +1462,7 @@ function PunchCard() {
                 </div>
                 <div className="stat-box">
                   <div className="stat-num" style={{ color: "#e07070" }}>{fmtHrs(totalOCHrs * 3600000)}</div>
-                  <div className="stat-lbl">On-Call Hrs</div>
+                  <div className="stat-lbl">Overtime Hrs</div>
                 </div>
               </div>
               <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
@@ -1472,7 +1472,7 @@ function PunchCard() {
                 </div>
                 <div className="stat-box">
                   <div className="stat-num" style={{ color: "#d4b84a", fontSize: 20 }}>{fmtPay(totalOCHrs, settings.oncallRate)}</div>
-                  <div className="stat-lbl">On-Call Pay</div>
+                  <div className="stat-lbl">Overtime Pay</div>
                 </div>
               </div>
               <div className="stat-box" style={{ marginBottom: 20 }}>
@@ -1504,7 +1504,7 @@ function PunchCard() {
                       </div>
                       <div className="stat-box" style={{ flex: 1 }}>
                         <div className="stat-num" style={{ color: "#e07070", fontSize: 18 }}>{fmtPay(ytd.ocGross, 1)}</div>
-                        <div className="stat-lbl">YTD On-Call</div>
+                        <div className="stat-lbl">YTD Overtime</div>
                       </div>
                     </div>
                     <div className="stat-box" style={{ marginBottom: 20 }}>
@@ -1666,7 +1666,7 @@ function PunchCard() {
 
             {shifts.map(shift => (
               <div key={shift.id} className="shift-row">
-                <span className={`badge ${shift.type}`}>{shift.type === "regular" ? "REG" : "ON-CALL"}</span>
+                <span className={`badge ${shift.type}`}>{shift.type === "regular" ? "REG" : "Overtime"}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontSize: 12 }}>
                     {new Date(shift.clockIn).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
