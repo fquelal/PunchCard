@@ -46,7 +46,7 @@
     const { useState, useEffect, useRef } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.1.1";
+const APP_VERSION = "1.1.2";
 
 // ── Storage — Claude artifact uses window.storage, deployed uses localStorage
 const appStorage = {
@@ -114,17 +114,18 @@ function fmtPay(hrs, rate) {
   return (hrs * rate).toLocaleString("en-US", { style: "currency", currency: "USD" });
 }
 
-function shiftNetMs(shift) {
+function shiftNetMs(shift, autoLunchMs) {
   if (!shift.clockOut) return 0;
   const raw = shift.clockOut - shift.clockIn;
+  const lms = autoLunchMs !== undefined ? autoLunchMs : LUNCH_MIN * 60000;
   const deduct = shift.lunchDuration != null && shift.lunchDuration > 0
     ? shift.lunchDuration
-    : (shift.type === "regular" ? LUNCH_MIN * 60000 : 0);
+    : (shift.type === "regular" ? lms : 0);
   return Math.max(0, raw - deduct);
 }
 
-function shiftNetHrs(shift) {
-  return shiftNetMs(shift) / 3600000;
+function shiftNetHrs(shift, autoLunchMs) {
+  return shiftNetMs(shift, autoLunchMs) / 3600000;
 }
 
 function weekStart(date = new Date()) {
@@ -311,13 +312,14 @@ function calcPaycheck(grossPeriod, filingStatus, preTaxPerPeriod) {
 
 // ── CSV Export ───────────────────────────────────────────────
 function exportCSV(shifts, settings) {
+  const lunchMs = settings.autoLunch !== false ? (settings.lunchMinutes || LUNCH_MIN) * 60000 : 0;
   const rows = [
     ["Date", "Day", "Type", "Clock In", "Clock Out", "Net Hours", "Gross Pay", "Note"],
   ];
   const sorted = [...shifts].sort((a, b) => a.clockIn - b.clockIn);
   for (const s of sorted) {
     const d = new Date(s.clockIn);
-    const hrs = shiftNetHrs(s);
+    const hrs = shiftNetHrs(s, lunchMs);
     const pay = hrs * (s.type === "regular" ? settings.regularRate : settings.oncallRate);
     rows.push([
       d.toLocaleDateString("en-US"),
@@ -331,9 +333,9 @@ function exportCSV(shifts, settings) {
     ]);
   }
   // Totals row
-  const totalHrs = sorted.reduce((a, s) => a + shiftNetHrs(s), 0);
+  const totalHrs = sorted.reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
   const totalPay = sorted.reduce((a, s) => {
-    return a + shiftNetHrs(s) * (s.type === "regular" ? settings.regularRate : settings.oncallRate);
+    return a + shiftNetHrs(s, lunchMs) * (s.type === "regular" ? settings.regularRate : settings.oncallRate);
   }, 0);
   rows.push(["TOTAL", "", "", "", "", totalHrs.toFixed(2), totalPay.toFixed(2), ""]);
 
@@ -349,10 +351,11 @@ function exportCSV(shifts, settings) {
 
 // ── YTD helper ───────────────────────────────────────────────
 function getYTD(shifts, settings) {
+  const lunchMs = settings.autoLunch !== false ? (settings.lunchMinutes || LUNCH_MIN) * 60000 : 0;
   const janFirst = new Date(new Date().getFullYear(), 0, 1).getTime();
   const ytd = shifts.filter(s => s.clockIn >= janFirst && s.clockOut);
-  const regGross = ytd.filter(s => s.type === "regular").reduce((a, s) => a + shiftNetHrs(s) * settings.regularRate, 0);
-  const ocGross  = ytd.filter(s => s.type === "oncall").reduce((a, s)  => a + shiftNetHrs(s) * settings.oncallRate, 0);
+  const regGross = ytd.filter(s => s.type === "regular").reduce((a, s) => a + shiftNetHrs(s, lunchMs) * settings.regularRate, 0);
+  const ocGross  = ytd.filter(s => s.type === "oncall").reduce((a, s)  => a + shiftNetHrs(s, lunchMs) * settings.oncallRate, 0);
   const total    = regGross + ocGross;
   return { regGross, ocGross, total };
 }
@@ -364,6 +367,7 @@ const defaultSettings = {
   regularRate: 18, oncallRate: 27, periodAnchor: defaultAnchor,
   filingStatus: "single", preTaxPerPeriod: 0,
   regularStart: "08:00", regularEnd: "16:30",
+  autoLunch: true, lunchMinutes: 30,
 };
 
 // ── Main Component ───────────────────────────────────────────
@@ -383,6 +387,8 @@ function PunchCard() {
   const [preTaxInput, setPreTaxInput]   = useState("0");
   const [regStartInput, setRegStartInput] = useState("08:00");
   const [regEndInput, setRegEndInput]     = useState("16:30");
+  const [autoLunchInput, setAutoLunchInput] = useState(true);
+  const [lunchMinInput, setLunchMinInput]   = useState("30");
   const [showPaystub, setShowPaystub]   = useState(false);
   const [dismissedWarnings, setDismissedWarnings] = useState({});
   const [viewingPeriodOffset, setViewingPeriodOffset] = useState(0);
@@ -472,6 +478,8 @@ function PunchCard() {
           setPreTaxInput(String(d.settings?.preTaxPerPeriod ?? 0));
           setRegStartInput(d.settings?.regularStart ?? "08:00");
           setRegEndInput(d.settings?.regularEnd ?? "16:30");
+          setAutoLunchInput(d.settings?.autoLunch !== false);
+          setLunchMinInput(String(d.settings?.lunchMinutes ?? 30));
         }
       } catch {}
       loaded.current = true;
@@ -563,6 +571,8 @@ function PunchCard() {
       preTaxPerPeriod: Math.max(0, parseFloat(preTaxInput) || 0),
       regularStart: regStartInput || "08:00",
       regularEnd: regEndInput || "16:30",
+      autoLunch: autoLunchInput,
+      lunchMinutes: Math.max(0, parseInt(lunchMinInput) || 30),
     };
     setSettings(ns);
     setSettingsOpen(false);
@@ -598,6 +608,8 @@ function PunchCard() {
         setPreTaxInput(String(s.preTaxPerPeriod ?? 0));
         setRegStartInput(s.regularStart || "08:00");
         setRegEndInput(s.regularEnd || "16:30");
+        setAutoLunchInput(s.autoLunch !== false);
+        setLunchMinInput(String(s.lunchMinutes ?? 30));
         persist(data.shifts, data.active || null, s);
         setImportStatus("ok");
         setTimeout(() => setImportStatus(null), 3000);
@@ -612,6 +624,7 @@ function PunchCard() {
   function exportExcel() {
     const XLSX = window.XLSX;
     if (!XLSX) { alert("Excel library not loaded. Check your connection."); return; }
+    const lunchMs = settings.autoLunch !== false ? (settings.lunchMinutes || LUNCH_MIN) * 60000 : 0;
     const wb = XLSX.utils.book_new();
 
     // ── Sheet 1: All Shifts ──────────────────────────────────
@@ -619,10 +632,10 @@ function PunchCard() {
     const shiftRows = [["Date","Day","Type","Clock In","Clock Out","Gross Hrs","Lunch Hrs","Net Hrs","Rate","Gross Pay","Note"]];
     for (const s of sorted) {
       const d   = new Date(s.clockIn);
-      const hrs = shiftNetHrs(s);
+      const hrs = shiftNetHrs(s, lunchMs);
       const rate = s.type === "regular" ? settings.regularRate : settings.oncallRate;
       const lunchHrs = s.lunchDuration ? (s.lunchDuration / 3600000).toFixed(2)
-        : s.type === "regular" ? "0.50" : "0.00";
+        : (s.type === "regular" && settings.autoLunch !== false) ? ((settings.lunchMinutes || LUNCH_MIN) / 60).toFixed(2) : "0.00";
       const grossHrs = s.clockOut ? ((s.clockOut - s.clockIn) / 3600000).toFixed(2) : "OPEN";
       shiftRows.push([
         d.toLocaleDateString("en-US"),
@@ -638,8 +651,8 @@ function PunchCard() {
       ]);
     }
     // Totals row
-    const totHrs  = sorted.reduce((a, s) => a + shiftNetHrs(s), 0);
-    const totPay  = sorted.reduce((a, s) => a + shiftNetHrs(s) * (s.type === "regular" ? settings.regularRate : settings.oncallRate), 0);
+    const totHrs  = sorted.reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
+    const totPay  = sorted.reduce((a, s) => a + shiftNetHrs(s, lunchMs) * (s.type === "regular" ? settings.regularRate : settings.oncallRate), 0);
     shiftRows.push(["TOTAL","","","","","","",totHrs.toFixed(2),"",totPay.toFixed(2),""]);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(shiftRows), "Shifts");
 
@@ -649,7 +662,7 @@ function PunchCard() {
       const ws  = weekStart(new Date(s.clockIn));
       const key = ws.toISOString().slice(0,10);
       if (!weekMap[key]) weekMap[key] = { regHrs:0, ocHrs:0, regPay:0, ocPay:0 };
-      const hrs = shiftNetHrs(s);
+      const hrs = shiftNetHrs(s, lunchMs);
       if (s.type === "regular") { weekMap[key].regHrs += hrs; weekMap[key].regPay += hrs * settings.regularRate; }
       else                      { weekMap[key].ocHrs  += hrs; weekMap[key].ocPay  += hrs * settings.oncallRate;  }
     }
@@ -698,12 +711,15 @@ function PunchCard() {
     persist(updated, active, settings);
   }
 
+  // Lunch deduction in ms (from settings)
+  const lunchMs = settings.autoLunch !== false ? (settings.lunchMinutes || LUNCH_MIN) * 60000 : 0;
+
   // Derived
   const todayShifts  = shifts.filter(s => sameDay(s.clockIn, now));
   const todayReg     = todayShifts.filter(s => s.type === "regular");
   const todayOC      = todayShifts.filter(s => s.type === "oncall");
-  const todayRegHrs  = todayReg.reduce((a, s) => a + shiftNetHrs(s), 0);
-  const todayOCHrs   = todayOC.reduce((a, s)  => a + shiftNetHrs(s), 0);
+  const todayRegHrs  = todayReg.reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
+  const todayOCHrs   = todayOC.reduce((a, s)  => a + shiftNetHrs(s, lunchMs), 0);
   const todayRegPay  = fmtPay(todayRegHrs, settings.regularRate);
   const todayOCPay   = fmtPay(todayOCHrs,  settings.oncallRate);
 
@@ -715,7 +731,7 @@ function PunchCard() {
     return d;
   });
   const weekShifts   = shifts.filter(s => s.clockIn >= ws.getTime() && s.clockOut);
-  const weekTotalHrs = weekShifts.reduce((a, s) => a + shiftNetHrs(s), 0);
+  const weekTotalHrs = weekShifts.reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
   const otStatus     = weekTotalHrs >= 40 ? "over" : weekTotalHrs >= 35 ? "warn" : "ok";
 
   // YTD
@@ -931,6 +947,44 @@ function PunchCard() {
               <input className="settings-input" value={rateInput.oncallRate} onChange={e => setRateInput(p => ({ ...p, oncallRate: e.target.value }))} placeholder="27.00" />
             </div>
           </div>
+          {/* Lunch settings */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 10, letterSpacing: 3, color: "#b09060", marginBottom: 12, textTransform: "uppercase" }}>Auto Lunch Deduction</div>
+            <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 9, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Auto-Deduct Lunch</div>
+                <div style={{ display: "flex", gap: 0 }}>
+                  <button
+                    onClick={() => setAutoLunchInput(true)}
+                    style={{ flex: 1, padding: "9px", background: autoLunchInput ? "#1a3d2a" : "#221e10", border: "1px solid", borderColor: autoLunchInput ? "#5dba8a" : "#3a3218", color: autoLunchInput ? "#5dba8a" : "#a09060", fontFamily: "'Courier Prime', monospace", fontSize: 11, letterSpacing: 1, cursor: "pointer" }}>
+                    ON
+                  </button>
+                  <button
+                    onClick={() => setAutoLunchInput(false)}
+                    style={{ flex: 1, padding: "9px", background: !autoLunchInput ? "#3d1a1a" : "#221e10", border: "1px solid", borderLeft: "none", borderColor: !autoLunchInput ? "#e07070" : "#3a3218", color: !autoLunchInput ? "#e07070" : "#a09060", fontFamily: "'Courier Prime', monospace", fontSize: 11, letterSpacing: 1, cursor: "pointer" }}>
+                    OFF
+                  </button>
+                </div>
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 9, color: autoLunchInput ? "#b09060" : "#5a5030", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Lunch Duration (min)</div>
+                <input
+                  className="settings-input"
+                  type="number" min="0" max="120" step="5"
+                  value={lunchMinInput}
+                  onChange={e => setLunchMinInput(e.target.value)}
+                  disabled={!autoLunchInput}
+                  style={{ opacity: autoLunchInput ? 1 : 0.4 }}
+                  placeholder="30"
+                />
+              </div>
+            </div>
+            <div style={{ fontSize: 9, color: "#8a7840", letterSpacing: 1, marginTop: 6 }}>
+              {autoLunchInput
+                ? `${lunchMinInput || 30}-min lunch auto-deducted from regular shifts`
+                : "No lunch deduction — hours counted as clocked"}
+            </div>
+          </div>
           <div style={{ marginBottom: 16 }}>
             <div style={{ fontSize: 9, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Pay Period Anchor Date</div>
             <input type="date" className="settings-input" value={anchorInput} onChange={e => setAnchorInput(e.target.value)} />
@@ -951,7 +1005,6 @@ function PunchCard() {
               <div style={{ fontSize: 9, color: "#8a7840", marginTop: 4 }}>401k, health ins., FSA, etc.</div>
             </div>
           </div>
-          <div style={{ fontSize: 10, color: "#8a7840", letterSpacing: 1, marginBottom: 14 }}>30-min lunch auto-deducted from regular shifts</div>
           <button className="save-btn" onClick={saveSettings}>Save Settings</button>
 
           {/* ── Data Management ── */}
@@ -1140,7 +1193,7 @@ function PunchCard() {
                       <div style={{ fontSize: 13 }}>{fmtTime(shift.clockIn)} → {fmtTime(shift.clockOut)}</div>
                       {shift.note && <div style={{ fontSize: 10, color: "#b09060", marginTop: 2 }}>{shift.note}</div>}
                     </div>
-                    <div style={{ fontSize: 13, color: "#d4b84a", marginRight: 8 }}>{fmtHrs(shiftNetMs(shift))}</div>
+                    <div style={{ fontSize: 13, color: "#d4b84a", marginRight: 8 }}>{fmtHrs(shiftNetMs(shift, lunchMs))}</div>
                     <button className="action-btn" style={{ marginRight: 4 }} onClick={() => setEditShift({ ...shift })}>✎</button>
                     <button className="action-btn danger" onClick={() => deleteShift(shift.id)}>×</button>
                   </div>
@@ -1245,8 +1298,8 @@ function PunchCard() {
               let totalRegHrs = 0, totalOCHrs = 0;
               const rows = weekDays.map(day => {
                 const dayShifts = shifts.filter(s => sameDay(s.clockIn, day));
-                const regHrs = dayShifts.filter(s => s.type === "regular").reduce((a, s) => a + shiftNetHrs(s), 0);
-                const ocHrs  = dayShifts.filter(s => s.type === "oncall").reduce((a, s)  => a + shiftNetHrs(s), 0);
+                const regHrs = dayShifts.filter(s => s.type === "regular").reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
+                const ocHrs  = dayShifts.filter(s => s.type === "oncall").reduce((a, s)  => a + shiftNetHrs(s, lunchMs), 0);
                 totalRegHrs += regHrs;
                 totalOCHrs  += ocHrs;
                 const isToday = sameDay(day, now);
@@ -1358,8 +1411,8 @@ function PunchCard() {
           let totalRegHrs = 0, totalOCHrs = 0;
           const dayRows = periodDays.map(day => {
             const dayShifts = shifts.filter(s => sameDay(s.clockIn, day));
-            const regHrs = dayShifts.filter(s => s.type === "regular").reduce((a, s) => a + shiftNetHrs(s), 0);
-            const ocHrs  = dayShifts.filter(s => s.type === "oncall").reduce((a, s)  => a + shiftNetHrs(s), 0);
+            const regHrs = dayShifts.filter(s => s.type === "regular").reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
+            const ocHrs  = dayShifts.filter(s => s.type === "oncall").reduce((a, s)  => a + shiftNetHrs(s, lunchMs), 0);
             totalRegHrs += regHrs;
             totalOCHrs  += ocHrs;
             const isToday = sameDay(day, now);
@@ -1475,7 +1528,7 @@ function PunchCard() {
                   <div className="stat-lbl">Overtime Pay</div>
                 </div>
               </div>
-              <div className="stat-box" style={{ marginBottom: 20 }}>
+              <div className="stat-box" style={{ marginBottom: 10 }}>
                 <div className="stat-num" style={{ color: "#d4b84a" }}>{fmtPay(totalPay, 1)}</div>
                 <div className="stat-lbl">Total Earned This Period</div>
                 {projectedPay !== null && projectedPay > totalPay && (
@@ -1484,6 +1537,21 @@ function PunchCard() {
                   </div>
                 )}
               </div>
+
+              {/* Est. After Deductions — always-visible summary */}
+              {totalPay > 0 && (() => {
+                const pc = calcPaycheck(totalPay, settings.filingStatus || "single", settings.preTaxPerPeriod || 0);
+                const effRate = pc.gross > 0 ? ((pc.totalDeductions - pc.preTax) / pc.gross * 100).toFixed(1) : "0.0";
+                return (
+                  <div className="stat-box" style={{ marginBottom: 20, borderLeft: "3px solid #5dba8a", background: "#141f18" }}>
+                    <div className="stat-num" style={{ color: "#5dba8a" }}>{fmtPay(Math.max(0, pc.netPay), 1)}</div>
+                    <div className="stat-lbl" style={{ color: "#5dba8a" }}>Est. After Deductions</div>
+                    <div style={{ fontSize: 10, color: "#8a7840", marginTop: 5, letterSpacing: 1 }}>
+                      {effRate}% effective tax · <span style={{ color: "#a09060", cursor: "pointer", textDecoration: "underline" }} onClick={() => setShowPaystub(true)}>full breakdown ▼</span>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* ── YTD + Wage Base Countdowns ── */}
               <div style={{ marginBottom: 20 }}>
@@ -1673,13 +1741,13 @@ function PunchCard() {
                   </div>
                   <div style={{ fontSize: 11, color: "#b09060", marginTop: 2 }}>
                     {fmtTime(shift.clockIn)} → {shift.clockOut ? fmtTime(shift.clockOut) : <span className="incomplete">OPEN</span>}
-                    {shift.type === "regular" && shift.clockOut && <span style={{ color: "#8a7840" }}> (−30m lunch)</span>}
+                    {shift.type === "regular" && shift.clockOut && settings.autoLunch !== false && <span style={{ color: "#8a7840" }}> (−{settings.lunchMinutes || LUNCH_MIN}m lunch)</span>}
                   </div>
                   {shift.note && <div style={{ fontSize: 10, color: "#9a8850", marginTop: 2 }}>{shift.note}</div>}
                 </div>
                 <div style={{ textAlign: "right", marginRight: 8 }}>
-                  <div style={{ fontSize: 13, color: "#d4b84a" }}>{fmtHrs(shiftNetMs(shift))}</div>
-                  <div style={{ fontSize: 10, color: "#b09060" }}>{fmtPay(shiftNetHrs(shift), shift.type === "regular" ? settings.regularRate : settings.oncallRate)}</div>
+                  <div style={{ fontSize: 13, color: "#d4b84a" }}>{fmtHrs(shiftNetMs(shift, lunchMs))}</div>
+                  <div style={{ fontSize: 10, color: "#b09060" }}>{fmtPay(shiftNetHrs(shift, lunchMs), shift.type === "regular" ? settings.regularRate : settings.oncallRate)}</div>
                 </div>
                 <button className="action-btn" style={{ marginRight: 4 }} onClick={() => setEditShift({ ...shift })}>✎</button>
                 <button className="action-btn danger" onClick={() => deleteShift(shift.id)}>×</button>
