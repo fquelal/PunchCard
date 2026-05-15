@@ -4,7 +4,7 @@
 //  The app will show an "Update Available" banner automatically.
 // ─────────────────────────────────────────────────────────────
 
-const CACHE_VERSION = "1.1.4";
+const CACHE_VERSION = "1.1.5";
 const CACHE_NAME    = `punchcard-${CACHE_VERSION}`;
 
 // Files to pre-cache on install
