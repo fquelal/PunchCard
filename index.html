@@ -47,7 +47,7 @@
     const { useState, useEffect, useRef } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.1.5";
+const APP_VERSION = "1.1.9";
 
 // ── Tab order
 const TABS = ["today", "week", "period", "log"];
@@ -130,6 +130,15 @@ function shiftNetMs(shift, autoLunchMs) {
 
 function shiftNetHrs(shift, autoLunchMs) {
   return shiftNetMs(shift, autoLunchMs) / 3600000;
+}
+
+// Split a shift into regular vs OT hours using the daily threshold.
+// Oncall shifts are always 100% OT regardless of length.
+function shiftSplit(shift, settings, lunchMs) {
+  const hrs = shiftNetHrs(shift, lunchMs);
+  if (shift.type === "oncall") return { regHrs: 0, otHrs: hrs };
+  const threshold = settings.dailyOtHours || 8;
+  return { regHrs: Math.min(hrs, threshold), otHrs: Math.max(0, hrs - threshold) };
 }
 
 function weekStart(date = new Date()) {
@@ -370,16 +379,18 @@ function getYTD(shifts, settings) {
 
 function calcWeekPay(weekShifts, settings, lunchMs) {
   const sorted = [...weekShifts].filter(s => s.clockOut).sort((a, b) => a.clockIn - b.clockIn);
-  let cumHrs = 0, regHrs = 0, otHrs = 0, regPay = 0, otPay = 0;
+  // cumRegHrs tracks only the "daily-regular" portion toward the 40h FLSA threshold
+  let cumRegHrs = 0, regHrs = 0, otHrs = 0, regPay = 0, otPay = 0;
   for (const s of sorted) {
-    const hrs = shiftNetHrs(s, lunchMs);
-    if (s.type === "oncall") { otHrs += hrs; otPay += hrs * settings.oncallRate; cumHrs += hrs; }
-    else {
-      const reg = Math.min(hrs, Math.max(0, 40 - cumHrs));
-      const ot  = hrs - reg;
-      regHrs += reg; otHrs += ot;
-      regPay += reg * settings.regularRate; otPay += ot * settings.oncallRate; cumHrs += hrs;
-    }
+    const { regHrs: dailyReg, otHrs: dailyOt } = shiftSplit(s, settings, lunchMs);
+    // Apply FLSA 40h weekly cap to the daily-regular portion
+    const weeklyReg = Math.min(dailyReg, Math.max(0, 40 - cumRegHrs));
+    const weeklyOt  = dailyReg - weeklyReg;
+    regHrs    += weeklyReg;
+    otHrs     += dailyOt + weeklyOt;
+    regPay    += weeklyReg * settings.regularRate;
+    otPay     += (dailyOt + weeklyOt) * settings.oncallRate;
+    cumRegHrs += dailyReg;
   }
   return { regHrs, otHrs, regPay, otPay, total: regPay + otPay };
 }
@@ -401,7 +412,7 @@ const defaultSettings = {
   regularRate: 18, oncallRate: 27, periodAnchor: defaultAnchor,
   filingStatus: "single", preTaxPerPeriod: 0,
   regularStart: "08:00", regularEnd: "16:30",
-  autoLunch: true, lunchMinutes: 30,
+  autoLunch: true, lunchMinutes: 30, dailyOtHours: 8,
 };
 
 // ── Main Component ───────────────────────────────────────────
@@ -423,7 +434,10 @@ function PunchCard() {
   const [regEndInput, setRegEndInput]     = useState("16:30");
   const [autoLunchInput, setAutoLunchInput] = useState(true);
   const [lunchMinInput, setLunchMinInput]   = useState("30");
+  const [dailyOtInput, setDailyOtInput]     = useState("8");
   const [showPaystub, setShowPaystub]   = useState(false);
+  const [privacyMode, setPrivacyMode]   = useState(false);
+  const [showAbout, setShowAbout]       = useState(false);
   const [dismissedWarnings, setDismissedWarnings] = useState({});
   const [viewingPeriodOffset, setViewingPeriodOffset] = useState(0);
   const [editingActiveClockIn, setEditingActiveClockIn] = useState(false);
@@ -433,6 +447,9 @@ function PunchCard() {
   const loaded = useRef(false);
   const importFileRef = useRef(null);
   const [importStatus, setImportStatus] = useState(null);
+  const [pendingDelete, setPendingDelete] = useState(null);
+  const undoTimerRef  = useRef(null);
+  const undoCountRef  = useRef(null);
 
   const swipeTouchStartX = useRef(null);
   const swipeTouchStartY = useRef(null);
@@ -531,6 +548,7 @@ function PunchCard() {
           setRegEndInput(d.settings?.regularEnd ?? "16:30");
           setAutoLunchInput(d.settings?.autoLunch !== false);
           setLunchMinInput(String(d.settings?.lunchMinutes ?? 30));
+          setDailyOtInput(String(d.settings?.dailyOtHours ?? 8));
         }
       } catch {}
       loaded.current = true;
@@ -624,6 +642,7 @@ function PunchCard() {
       regularEnd: regEndInput || "16:30",
       autoLunch: autoLunchInput,
       lunchMinutes: Math.max(0, parseInt(lunchMinInput) || 30),
+      dailyOtHours: Math.max(1, parseFloat(dailyOtInput) || 8),
     };
     setSettings(ns);
     setSettingsOpen(false);
@@ -661,6 +680,7 @@ function PunchCard() {
         setRegEndInput(s.regularEnd || "16:30");
         setAutoLunchInput(s.autoLunch !== false);
         setLunchMinInput(String(s.lunchMinutes ?? 30));
+        setDailyOtInput(String(s.dailyOtHours ?? 8));
         persist(data.shifts, data.active || null, s);
         setImportStatus("ok");
         setTimeout(() => setImportStatus(null), 3000);
@@ -748,9 +768,44 @@ function PunchCard() {
   }
 
   function deleteShift(id) {
+    // Commit any in-flight pending delete before starting a new one
+    if (pendingDelete) {
+      clearTimeout(undoTimerRef.current);
+      clearInterval(undoCountRef.current);
+      persist(shifts, active, settings);
+    }
+
+    const shift = shifts.find(s => s.id === id);
+    if (!shift) return;
     const updated = shifts.filter(s => s.id !== id);
     setShifts(updated);
-    persist(updated, active, settings);
+    setPendingDelete({ shift, secondsLeft: 5 });
+
+    // Tick the countdown each second
+    let secs = 4;
+    undoCountRef.current = setInterval(() => {
+      setPendingDelete(prev => prev ? { ...prev, secondsLeft: secs } : null);
+      secs--;
+      if (secs < 0) clearInterval(undoCountRef.current);
+    }, 1000);
+
+    // Commit after 5 s
+    const capturedActive   = active;
+    const capturedSettings = settings;
+    undoTimerRef.current = setTimeout(() => {
+      clearInterval(undoCountRef.current);
+      setPendingDelete(null);
+      persist(updated, capturedActive, capturedSettings);
+    }, 5000);
+  }
+
+  function undoDelete() {
+    if (!pendingDelete) return;
+    clearTimeout(undoTimerRef.current);
+    clearInterval(undoCountRef.current);
+    const restored = [...shifts, pendingDelete.shift].sort((a, b) => b.clockIn - a.clockIn);
+    setShifts(restored);
+    setPendingDelete(null);
   }
 
   function saveEdit() {
@@ -776,12 +831,14 @@ function PunchCard() {
   const todayShifts    = shifts.filter(s => sameDay(s.clockIn, now));
   const preTodayShifts = weekShifts.filter(s => !sameDay(s.clockIn, now));
   const preTodayHrs    = preTodayShifts.reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
+  const preTodayRegHrs = preTodayShifts.reduce((a, s) => a + shiftSplit(s, settings, lunchMs).regHrs, 0);
   const todayCompleted = todayShifts.filter(s => s.clockOut);
-  let _cum = preTodayHrs, todayRegHrs = 0, todayOTHrs = 0;
+  let _cumReg = preTodayRegHrs, todayRegHrs = 0, todayOTHrs = 0;
   for (const s of [...todayCompleted].sort((a, b) => a.clockIn - b.clockIn)) {
-    const hrs = shiftNetHrs(s, lunchMs);
-    if (s.type === "oncall") { todayOTHrs += hrs; _cum += hrs; }
-    else { const reg = Math.min(hrs, Math.max(0, 40 - _cum)); todayRegHrs += reg; todayOTHrs += hrs - reg; _cum += hrs; }
+    const { regHrs: dailyReg, otHrs: dailyOt } = shiftSplit(s, settings, lunchMs);
+    const weeklyReg = Math.min(dailyReg, Math.max(0, 40 - _cumReg));
+    const weeklyOt  = dailyReg - weeklyReg;
+    todayRegHrs += weeklyReg; todayOTHrs += dailyOt + weeklyOt; _cumReg += dailyReg;
   }
   const todayOCHrs = todayOTHrs;
   const todayRegPay = fmtPay(todayRegHrs, settings.regularRate);
@@ -816,6 +873,23 @@ function PunchCard() {
   const activeElapsed = active ? now - active.clockIn : 0;
   const lunchElapsed  = active?.onLunch ? now - active.lunchStart : 0;
   const activeType = active?.type;
+
+  // ── Live ticker ──────────────────────────────────────────────
+  const dailyThreshold = settings.dailyOtHours || 8;
+  const activeNetMs  = active
+    ? Math.max(0, activeElapsed - (active.lunchDuration || 0) - lunchElapsed)
+    : 0;
+  const activeNetHrs = activeNetMs / 3600000;
+  const tickRegHrs   = active?.type === "oncall" ? 0 : Math.min(activeNetHrs, dailyThreshold);
+  const tickOtHrs    = active?.type === "oncall" ? activeNetHrs : Math.max(0, activeNetHrs - dailyThreshold);
+  const tickEarned   = tickRegHrs * settings.regularRate + tickOtHrs * settings.oncallRate;
+  const tickIsOT     = active?.type === "oncall" || tickOtHrs > 0;
+  const tickOtPct    = Math.min(100, (tickRegHrs / dailyThreshold) * 100);
+
+  // ── Privacy helpers ──────────────────────────────────────────
+  const PRIV = '——';
+  const $p   = (str) => privacyMode ? PRIV : str;
+  const fpay = (hrs, rate) => privacyMode ? PRIV : fmtPay(hrs, rate);
 
   return (
     <div style={{ height: "100dvh", background: "#18160f", color: "#f0ead8", fontFamily: "'Courier Prime', 'Courier New', monospace", display: "flex", flexDirection: "column", overflow: "hidden" }}>
@@ -945,6 +1019,82 @@ function PunchCard() {
         .ot-bar { height: 100%; border-radius: 3px; transition: width 0.4s; }
         .wage-bar-wrap { height: 4px; background: #221e10; border-radius: 2px; overflow: hidden; margin-top: 5px; }
         .wage-bar { height: 100%; border-radius: 2px; transition: width 0.4s; }
+
+        .settings-backdrop {
+          position: fixed; inset: 0; z-index: 100;
+          background: rgba(0,0,0,0); transition: background 0.3s;
+          pointer-events: none;
+        }
+        .settings-backdrop.open {
+          background: rgba(0,0,0,0.65); pointer-events: auto;
+        }
+        .settings-sheet {
+          position: fixed; bottom: 0; left: 0; right: 0; z-index: 101;
+          background: #18160f;
+          border-top: 1px solid #3a3218;
+          border-radius: 16px 16px 0 0;
+          max-height: 88vh; overflow-y: auto;
+          transform: translateY(100%);
+          transition: transform 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+          padding-bottom: calc(24px + env(safe-area-inset-bottom));
+        }
+        .settings-sheet.open { transform: translateY(0); }
+        .sheet-handle {
+          display: flex; justify-content: center; padding: 12px 0 6px;
+        }
+        .sheet-handle-bar {
+          width: 36px; height: 4px; border-radius: 2px; background: #3a3218;
+        }
+        .sheet-header {
+          display: flex; justify-content: space-between; align-items: center;
+          padding: 4px 20px 16px;
+          border-bottom: 1px solid #2a2510; margin-bottom: 20px;
+        }
+        .sheet-close {
+          background: #221e10; border: 1px solid #3a3218; color: #a09060;
+          width: 32px; height: 32px; border-radius: 50%;
+          font-size: 18px; line-height: 1; cursor: pointer;
+          display: flex; align-items: center; justify-content: center;
+          transition: all 0.12s;
+        }
+        .sheet-close:hover { border-color: #d4b84a; color: #d4b84a; }
+
+        .edit-backdrop {
+          position: fixed; inset: 0; z-index: 102;
+          background: rgba(0,0,0,0); transition: background 0.3s;
+          pointer-events: none;
+        }
+        .edit-backdrop.open { background: rgba(0,0,0,0.65); pointer-events: auto; }
+        .edit-sheet {
+          position: fixed; bottom: 0; left: 0; right: 0; z-index: 103;
+          background: #18160f;
+          border-top: 1px solid #3a3218;
+          border-radius: 16px 16px 0 0;
+          max-height: 80vh; overflow-y: auto;
+          transform: translateY(100%);
+          transition: transform 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+          padding-bottom: calc(24px + env(safe-area-inset-bottom));
+        }
+        .edit-sheet.open { transform: translateY(0); }
+
+        .undo-toast {
+          position: fixed;
+          bottom: calc(24px + env(safe-area-inset-bottom));
+          left: 50%; transform: translateX(-50%) translateY(calc(100% + 32px));
+          transition: transform 0.3s cubic-bezier(0.32, 0.72, 0, 1);
+          z-index: 300; white-space: nowrap;
+        }
+        .undo-toast.visible {
+          transform: translateX(-50%) translateY(0);
+        }
+        @keyframes undoBar {
+          from { transform: scaleX(1); }
+          to   { transform: scaleX(0); }
+        }
+        @keyframes pulse {
+          0%, 100% { opacity: 1; }
+          50%       { opacity: 0.25; }
+        }
       `}</style>
 
       {/* ── Update Banner ── */}
@@ -965,7 +1115,33 @@ function PunchCard() {
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <span style={{ fontSize: 13, color: "#7a6838", letterSpacing: 1 }}>v{APP_VERSION}</span>
           <button
-          onClick={() => { setSettingsOpen(!settingsOpen); setRateInput({ regularRate: String(settings.regularRate), oncallRate: String(settings.oncallRate) }); }}
+            onClick={() => setPrivacyMode(p => !p)}
+            style={{
+              background: privacyMode ? "#3a2a08" : "none",
+              border: `1px solid ${privacyMode ? "#d4b84a" : "#3a3218"}`,
+              color: privacyMode ? "#d4b84a" : "#6a5f38",
+              fontFamily: "'Courier Prime', monospace",
+              fontSize: 11, letterSpacing: 2,
+              padding: "4px 9px", cursor: "pointer",
+              textTransform: "uppercase", transition: "all 0.15s",
+            }}
+            title={privacyMode ? "Show dollar amounts" : "Hide dollar amounts"}
+          >{privacyMode ? "SHOW" : "HIDE"}</button>
+          <button
+          onClick={() => {
+            if (!settingsOpen) {
+              setRateInput({ regularRate: String(settings.regularRate), oncallRate: String(settings.oncallRate) });
+              setAnchorInput(settings.periodAnchor || defaultAnchor);
+              setFilingInput(settings.filingStatus || "single");
+              setPreTaxInput(String(settings.preTaxPerPeriod ?? 0));
+              setRegStartInput(settings.regularStart || "08:00");
+              setRegEndInput(settings.regularEnd || "16:30");
+              setAutoLunchInput(settings.autoLunch !== false);
+              setLunchMinInput(String(settings.lunchMinutes ?? 30));
+              setDailyOtInput(String(settings.dailyOtHours ?? 8));
+            }
+            setSettingsOpen(!settingsOpen);
+          }}
           style={{ background: "none", border: "none", color: "#b09060", cursor: "pointer", fontSize: 20, lineHeight: 1 }}
           title="Settings"
         >⚙</button>
@@ -989,97 +1165,6 @@ function PunchCard() {
         style={{ flex: 1, overflowY: "auto", padding: "24px 20px", paddingBottom: "calc(24px + env(safe-area-inset-bottom))", maxWidth: 540, width: "100%", margin: "0 auto" }}>
 
 
-        {/* ── Settings Panel ── */}
-        {settingsOpen && (
-          <div style={{ marginBottom: 8, paddingBottom: 24, borderBottom: "1px solid #2a2510" }}>
-
-          <div style={{ fontSize: 14, letterSpacing: 3, color: "#b09060", marginBottom: 16, textTransform: "uppercase" }}>Hourly Rates</div>
-          <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Regular Start</div>
-              <input type="time" className="settings-input" value={regStartInput} onChange={e => setRegStartInput(e.target.value)} />
-            </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Regular End</div>
-              <input type="time" className="settings-input" value={regEndInput} onChange={e => setRegEndInput(e.target.value)} />
-            </div>
-          </div>
-          <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Regular Rate (8–4:30)</div>
-              <input className="settings-input" value={rateInput.regularRate} onChange={e => setRateInput(p => ({ ...p, regularRate: e.target.value }))} placeholder="18.00" />
-            </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Overtime / Emergency</div>
-              <input className="settings-input" value={rateInput.oncallRate} onChange={e => setRateInput(p => ({ ...p, oncallRate: e.target.value }))} placeholder="27.00" />
-            </div>
-          </div>
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Pay Period Anchor Date</div>
-            <input type="date" className="settings-input" value={anchorInput} onChange={e => setAnchorInput(e.target.value)} />
-            <div style={{ fontSize: 13, color: "#8a7840", letterSpacing: 1, marginTop: 6 }}>First day of any known pay period — used to calculate all future periods</div>
-          </div>
-          <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Filing Status</div>
-              <select className="settings-input" value={filingInput} onChange={e => setFilingInput(e.target.value)}
-                style={{ appearance: "none", cursor: "pointer" }}>
-                <option value="single">Single</option>
-                <option value="married">Married (MFJ)</option>
-              </select>
-            </div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Pre-Tax Deductions / Period</div>
-              <input className="settings-input" placeholder="0.00" value={preTaxInput} onChange={e => setPreTaxInput(e.target.value)} />
-              <div style={{ fontSize: 13, color: "#8a7840", marginTop: 4 }}>401k, health ins., FSA, etc.</div>
-            </div>
-          </div>
-          {/* Auto Lunch */}
-          <div style={{ marginBottom: 16 }}>
-            <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 10, textTransform: "uppercase" }}>Auto Lunch Deduction</div>
-            <div style={{ display: "flex", gap: 12, alignItems: "flex-end" }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Auto-Deduct</div>
-                <div style={{ display: "flex" }}>
-                  <button onClick={() => setAutoLunchInput(true)} style={{ flex: 1, padding: "9px", background: autoLunchInput ? "#1a3d2a" : "#221e10", border: "1px solid", borderColor: autoLunchInput ? "#5dba8a" : "#3a3218", color: autoLunchInput ? "#5dba8a" : "#a09060", fontFamily: "'Courier Prime', monospace", fontSize: 13, letterSpacing: 1, cursor: "pointer" }}>ON</button>
-                  <button onClick={() => setAutoLunchInput(false)} style={{ flex: 1, padding: "9px", background: !autoLunchInput ? "#3d1a1a" : "#221e10", border: "1px solid", borderLeft: "none", borderColor: !autoLunchInput ? "#e07070" : "#3a3218", color: !autoLunchInput ? "#e07070" : "#a09060", fontFamily: "'Courier Prime', monospace", fontSize: 13, letterSpacing: 1, cursor: "pointer" }}>OFF</button>
-                </div>
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, color: autoLunchInput ? "#b09060" : "#5a5030", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Duration (min)</div>
-                <input className="settings-input" type="number" min="0" max="120" step="5" value={lunchMinInput} onChange={e => setLunchMinInput(e.target.value)} disabled={!autoLunchInput} style={{ opacity: autoLunchInput ? 1 : 0.4 }} placeholder="30" />
-              </div>
-            </div>
-            <div style={{ fontSize: 13, color: "#8a7840", letterSpacing: 1, marginTop: 6 }}>
-              {autoLunchInput ? `${lunchMinInput || 30}-min lunch auto-deducted from regular shifts` : "No auto deduction — hours counted as clocked"}
-            </div>
-          </div>
-          <button className="save-btn" onClick={saveSettings}>Save Settings</button>
-
-          {/* ── Data Management ── */}
-          <div style={{ borderTop: "1px solid #2a2510", marginTop: 20, paddingTop: 16 }}>
-            <div style={{ fontSize: 14, letterSpacing: 3, color: "#b09060", marginBottom: 12, textTransform: "uppercase" }}>Data</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <button className="action-btn" style={{ textAlign: "left", padding: "10px 14px", color: "#b09060", borderColor: "#3a3218" }}
-                onClick={exportBackup}>
-                ↓ Export Backup (.json)
-              </button>
-              <button className="action-btn" style={{ textAlign: "left", padding: "10px 14px", color: "#b09060", borderColor: "#3a3218" }}
-                onClick={() => importFileRef.current?.click()}>
-                ↑ Import Backup (.json)
-              </button>
-              <input ref={importFileRef} type="file" accept=".json" style={{ display: "none" }}
-                onChange={e => { importBackup(e.target.files[0]); e.target.value = ""; }} />
-              {importStatus === "ok" && <div style={{ fontSize: 14, color: "#5dba8a", letterSpacing: 1 }}>✓ Backup restored successfully</div>}
-              {importStatus === "err" && <div style={{ fontSize: 14, color: "#e07070", letterSpacing: 1 }}>✗ Invalid backup file</div>}
-              <button className="action-btn" style={{ textAlign: "left", padding: "10px 14px", color: "#b09060", borderColor: "#3a3218" }}
-                onClick={exportExcel}>
-                ↓ Export to Excel (.xlsx)
-              </button>
-            </div>
-          </div>
-          </div>
-        )}
         {/* ══════════ TODAY TAB ══════════ */}
         {tab === "today" && (
           <div>
@@ -1122,32 +1207,9 @@ function PunchCard() {
                       <button className="action-btn" style={{ padding: "5px 14px", fontSize: 13, letterSpacing: 1 }} title="Edit clock-in time" onClick={() => { const d = new Date(active.clockIn); const local = new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0,16); setActiveClockInInput(local); setEditingActiveClockIn(true); }}>Edit</button>
                     </div>
                   )}
-                  <div style={{ fontSize: 13, color: activeType === "regular" ? "#5dba8a" : "#e07070", letterSpacing: 2, textTransform: "uppercase", marginBottom: active.type === "regular" ? 12 : 0 }}>
-                    {activeType === "regular" ? "REGULAR SHIFT" : "Overtime SHIFT"}
+                  <div style={{ fontSize: 13, color: activeType === "regular" ? "#5dba8a" : "#e07070", letterSpacing: 2, textTransform: "uppercase" }}>
+                    {activeType === "regular" ? "Regular Shift" : "Overtime Shift"}
                   </div>
-                  {/* Lunch button — regular shifts only */}
-                  {active.type === "regular" && !active.onLunch && (
-                    <button onClick={handleLunchStart} style={{ background: "none", border: "1px solid #3a3218", color: "#a09060", fontFamily: "'Courier Prime', monospace", fontSize: 13, letterSpacing: 2, padding: "6px 18px", cursor: "pointer", transition: "all 0.15s" }}
-                      onMouseEnter={e => { e.target.style.borderColor="#d4b84a"; e.target.style.color="#d4b84a"; }}
-                      onMouseLeave={e => { e.target.style.borderColor="#3a3218"; e.target.style.color="#a09060"; }}>
-                      🍽 Lunch
-                    </button>
-                  )}
-                  {active.onLunch && (
-                    <div style={{ marginTop: 4 }}>
-                      <div style={{ fontSize: 14, color: "#d4b84a", letterSpacing: 2, textTransform: "uppercase", marginBottom: 8 }}>
-                        On Lunch · {fmtHrs(lunchElapsed)}
-                      </div>
-                      <button onClick={handleLunchReturn} style={{ background: "#2d6a4f", border: "none", color: "#a8f0c6", fontFamily: "'Oswald', sans-serif", fontSize: 13, letterSpacing: 3, padding: "8px 24px", cursor: "pointer", textTransform: "uppercase" }}>
-                        Back
-                      </button>
-                    </div>
-                  )}
-                  {active.lunchDuration > 0 && !active.onLunch && (
-                    <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 1, marginTop: 6 }}>
-                      Lunch taken: {fmtHrs(active.lunchDuration)}
-                    </div>
-                  )}
                 </div>
               )}
 
@@ -1169,7 +1231,93 @@ function PunchCard() {
                   />
                 </div>
               )}
+
+              {/* Lunch — full-width below punch button, regular shifts only */}
+              {active && active.type === "regular" && (
+                <div style={{ marginTop: 18, width: "100%", maxWidth: 280 }}>
+                  {!active.onLunch ? (
+                    <button
+                      onClick={handleLunchStart}
+                      style={{
+                        width: "100%", padding: "11px 0",
+                        background: "#1a1810",
+                        border: "1px solid #3a3218",
+                        color: "#7a6838",
+                        fontFamily: "'Oswald', sans-serif",
+                        fontSize: 13, letterSpacing: 3,
+                        textTransform: "uppercase", cursor: "pointer",
+                        transition: "all 0.15s",
+                      }}
+                      onMouseEnter={e => { e.currentTarget.style.borderColor="#6a5a28"; e.currentTarget.style.color="#b09060"; }}
+                      onMouseLeave={e => { e.currentTarget.style.borderColor="#3a3218"; e.currentTarget.style.color="#7a6838"; }}
+                    >
+                      Start Lunch
+                    </button>
+                  ) : (
+                    <div style={{ background: "#1a1508", border: "1px solid #4a4010", padding: "12px 16px" }}>
+                      <div style={{ fontSize: 12, letterSpacing: 3, color: "#8a7840", textTransform: "uppercase", marginBottom: 6 }}>On Lunch</div>
+                      <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 22, color: "#d4b84a", letterSpacing: 2, marginBottom: 10 }}>
+                        {fmtHrs(lunchElapsed)}
+                      </div>
+                      <button
+                        onClick={handleLunchReturn}
+                        style={{
+                          width: "100%", padding: "10px 0",
+                          background: "#2d6a4f", border: "none",
+                          color: "#a8f0c6",
+                          fontFamily: "'Oswald', sans-serif",
+                          fontSize: 13, letterSpacing: 3,
+                          textTransform: "uppercase", cursor: "pointer",
+                        }}
+                      >
+                        Back from Lunch
+                      </button>
+                    </div>
+                  )}
+                  {active.lunchDuration > 0 && !active.onLunch && (
+                    <div style={{ fontSize: 12, color: "#5a5030", letterSpacing: 1, marginTop: 6, textAlign: "center" }}>
+                      Lunch taken · {fmtHrs(active.lunchDuration)}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
+
+            {/* Live earnings ticker — only while clocked in */}
+            {active && (
+              <div style={{
+                background: "#221e10",
+                border: `1px solid ${tickIsOT ? "#5c1a1a" : "#1a3d2a"}`,
+                padding: "14px 16px", marginBottom: 16,
+              }}>
+                <div style={{ fontSize: 11, letterSpacing: 3, color: tickIsOT ? "#e07070" : "#5dba8a", textTransform: "uppercase", marginBottom: 8 }}>
+                  <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: tickIsOT ? "#e07070" : "#5dba8a", marginRight: 6, verticalAlign: "middle", animation: "pulse 1s infinite" }} />
+                  Earned this shift
+                </div>
+                <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 38, fontWeight: 600, letterSpacing: 1, color: tickIsOT ? "#e07070" : "#d4b84a", lineHeight: 1 }}>
+                  {$p(`$${tickEarned.toFixed(2)}`)}
+                </div>
+                <div style={{ fontSize: 12, color: tickIsOT ? "#7a3030" : "#4a6838", letterSpacing: 1, marginTop: 5 }}>
+                  {tickIsOT && active.type !== "oncall"
+                    ? `${fmtHrs(tickRegHrs * 3600000)} reg · ${fmtHrs(tickOtHrs * 3600000)} OT`
+                    : fmtHrs(activeNetMs)
+                  } · {$p(active.type === "oncall" || tickIsOT ? `$${settings.oncallRate}` : `$${settings.regularRate}`)}/hr
+                </div>
+                {active.type !== "oncall" && (
+                  <div style={{ marginTop: 10 }}>
+                    <div className="ot-bar-wrap">
+                      <div className="ot-bar" style={{ width: `${tickOtPct}%`, background: tickIsOT ? "#e07070" : "#5dba8a" }} />
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3 }}>
+                      <span style={{ fontSize: 10, color: "#3a3218", letterSpacing: 1 }}>0h</span>
+                      <span style={{ fontSize: 10, color: tickIsOT ? "#7a3030" : "#3a5a30", letterSpacing: 1 }}>
+                        {tickIsOT ? `${fmtHrs(tickOtHrs * 3600000)} over daily threshold` : `OT at ${dailyThreshold}h`}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Today stats */}
             <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
@@ -1184,11 +1332,11 @@ function PunchCard() {
             </div>
             <div style={{ display: "flex", gap: 10, marginBottom: 28 }}>
               <div className="stat-box">
-                <div className="stat-num" style={{ color: "#d4b84a" }}>{todayRegPay}</div>
+                <div className="stat-num" style={{ color: "#d4b84a" }}>{$p(todayRegPay)}</div>
                 <div className="stat-lbl">Regular est.</div>
               </div>
               <div className="stat-box">
-                <div className="stat-num" style={{ color: "#d4b84a" }}>{todayOCPay}</div>
+                <div className="stat-num" style={{ color: "#d4b84a" }}>{$p(todayOCPay)}</div>
                 <div className="stat-lbl">Overtime est.</div>
               </div>
             </div>
@@ -1288,38 +1436,6 @@ function PunchCard() {
             {/* Edit modal (shared with log tab) */}
 
             {/* Edit modal (shared with log tab) */}
-            {editShift && tab === "today" && (
-              <div style={{ background: "#221e10", border: "1px solid #d4b84a", padding: 16, marginTop: 16 }}>
-                <div style={{ fontSize: 13, color: "#d4b84a", letterSpacing: 2, marginBottom: 12, textTransform: "uppercase" }}>Edit Shift</div>
-                <div style={{ marginBottom: 10 }}>
-                  <div style={{ fontSize: 13, color: "#b09060", marginBottom: 4, letterSpacing: 1 }}>CLOCK IN</div>
-                  <input type="datetime-local" className="edit-input"
-                    value={new Date(editShift.clockIn - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}
-                    onChange={e => setEditShift(p => ({ ...p, clockIn: new Date(e.target.value).getTime() }))} />
-                </div>
-                <div style={{ marginBottom: 10 }}>
-                  <div style={{ fontSize: 13, color: "#b09060", marginBottom: 4, letterSpacing: 1 }}>CLOCK OUT</div>
-                  <input type="datetime-local" className="edit-input"
-                    value={editShift.clockOut ? new Date(editShift.clockOut - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ""}
-                    onChange={e => setEditShift(p => ({ ...p, clockOut: e.target.value ? new Date(e.target.value).getTime() : null }))} />
-                </div>
-                <div style={{ marginBottom: 10 }}>
-                  <div style={{ fontSize: 13, color: "#b09060", marginBottom: 4, letterSpacing: 1 }}>LUNCH OVERRIDE (min)</div>
-                  <input type="number" min="0" max="120" step="5" className="edit-input"
-                    value={editShift.lunchDuration ? Math.round(editShift.lunchDuration / 60000) : ""}
-                    placeholder={`auto (${settings.autoLunch !== false ? settings.lunchMinutes || 30 : 0}m)`}
-                    onChange={e => setEditShift(p => ({ ...p, lunchDuration: e.target.value ? parseInt(e.target.value) * 60000 : 0 }))} />
-                </div>
-                <div style={{ marginBottom: 12 }}>
-                  <div style={{ fontSize: 13, color: "#b09060", marginBottom: 4, letterSpacing: 1 }}>NOTE</div>
-                  <input className="edit-input" value={editShift.note || ""} onChange={e => setEditShift(p => ({ ...p, note: e.target.value }))} placeholder="Optional note…" />
-                </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button className="save-btn" style={{ fontSize: 13, padding: "8px 20px" }} onClick={saveEdit}>Save</button>
-                  <button className="action-btn" onClick={() => setEditShift(null)}>Cancel</button>
-                </div>
-              </div>
-            )}
           </div>
         )}
         {tab === "week" && (
@@ -1329,13 +1445,13 @@ function PunchCard() {
             </div>
 
             {(() => {
-              let totalRegHrs = 0, totalOCHrs = 0;
               const rows = weekDays.map(day => {
                 const dayShifts = shifts.filter(s => sameDay(s.clockIn, day));
-                const regHrs = dayShifts.filter(s => s.type === "regular").reduce((a, s) => a + shiftNetHrs(s), 0);
-                const ocHrs  = dayShifts.filter(s => s.type === "oncall").reduce((a, s)  => a + shiftNetHrs(s), 0);
-                totalRegHrs += regHrs;
-                totalOCHrs  += ocHrs;
+                // Per-day: apply daily threshold only (not weekly FLSA) for display
+                const { regHrs, otHrs: ocHrs } = dayShifts.reduce((acc, s) => {
+                  const sp = shiftSplit(s, settings, lunchMs);
+                  return { regHrs: acc.regHrs + sp.regHrs, otHrs: acc.otHrs + sp.otHrs };
+                }, { regHrs: 0, otHrs: 0 });
                 const isToday = sameDay(day, now);
                 const hasOpen = isToday && active;
                 const isEmpty = dayShifts.length === 0 && !hasOpen;
@@ -1366,7 +1482,7 @@ function PunchCard() {
                           {regHrs > 0 && <div style={{ fontSize: 15, color: "#5dba8a" }}>{fmtHrs(regHrs * 3600000)}</div>}
                           {ocHrs  > 0 && <div style={{ fontSize: 15, color: "#e07070" }}>{fmtHrs(ocHrs  * 3600000)}</div>}
                           <div style={{ fontSize: 14, color: "#d4b84a", marginTop: 2 }}>
-                            {fmtPay(regHrs * settings.regularRate + ocHrs * settings.oncallRate > 0 ? 1 : 0, regHrs * settings.regularRate + ocHrs * settings.oncallRate)}
+                            {$p(fmtPay(regHrs * settings.regularRate + ocHrs * settings.oncallRate > 0 ? 1 : 0, regHrs * settings.regularRate + ocHrs * settings.oncallRate))}
                           </div>
                         </div>
                       )}
@@ -1384,26 +1500,26 @@ function PunchCard() {
                       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, letterSpacing: 1, marginBottom: 4 }}>
                         <span style={{ color: "#b09060", textTransform: "uppercase", letterSpacing: 2 }}>FLSA Overtime Threshold</span>
                         <span style={{ color: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a", fontFamily: "'Oswald', sans-serif", fontSize: 13 }}>
-                          {fmtHrs(totalRegHrs * 3600000)} + {fmtHrs(totalOCHrs * 3600000)} = {fmtHrs((totalRegHrs + totalOCHrs) * 3600000)} / 40h
+                          {fmtHrs(weekPay.regHrs * 3600000)} + {fmtHrs(weekPay.otHrs * 3600000)} = {fmtHrs((weekPay.regHrs + weekPay.otHrs) * 3600000)} / 40h
                         </span>
                       </div>
                       <div className="ot-bar-wrap">
-                        <div className="ot-bar" style={{ width: `${Math.min(100, ((totalRegHrs + totalOCHrs) / 40) * 100)}%`, background: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a" }} />
+                        <div className="ot-bar" style={{ width: `${Math.min(100, ((weekPay.regHrs + weekPay.otHrs) / 40) * 100)}%`, background: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a" }} />
                       </div>
                     </div>
                     <div style={{ display: "flex", gap: 10 }}>
                       <div className="stat-box">
-                        <div className="stat-num" style={{ color: "#5dba8a" }}>{fmtHrs(totalRegHrs * 3600000)}</div>
+                        <div className="stat-num" style={{ color: "#5dba8a" }}>{fmtHrs(weekPay.regHrs * 3600000)}</div>
                         <div className="stat-lbl">Week Regular</div>
                       </div>
                       <div className="stat-box">
-                        <div className="stat-num" style={{ color: "#e07070" }}>{fmtHrs(totalOCHrs * 3600000)}</div>
+                        <div className="stat-num" style={{ color: "#e07070" }}>{fmtHrs(weekPay.otHrs * 3600000)}</div>
                         <div className="stat-lbl">Week Overtime</div>
                       </div>
                     </div>
                     <div style={{ marginTop: 10 }} className="stat-box">
                       <div className="stat-num" style={{ color: "#d4b84a" }}>
-                        {fmtPay(totalRegHrs, settings.regularRate)} + {fmtPay(totalOCHrs, settings.oncallRate)}
+                        {fpay(weekPay.regHrs, settings.regularRate)} + {fpay(weekPay.otHrs, settings.oncallRate)}
                       </div>
                       <div className="stat-lbl">Estimated Week Pay (Reg + Overtime)</div>
                     </div>
@@ -1445,8 +1561,10 @@ function PunchCard() {
           let totalRegHrs = 0, totalOCHrs = 0;
           const dayRows = periodDays.map(day => {
             const dayShifts = shifts.filter(s => sameDay(s.clockIn, day));
-            const regHrs = dayShifts.filter(s => s.type === "regular").reduce((a, s) => a + shiftNetHrs(s), 0);
-            const ocHrs  = dayShifts.filter(s => s.type === "oncall").reduce((a, s)  => a + shiftNetHrs(s), 0);
+            const { regHrs, otHrs: ocHrs } = dayShifts.reduce((acc, s) => {
+              const sp = shiftSplit(s, settings, lunchMs);
+              return { regHrs: acc.regHrs + sp.regHrs, otHrs: acc.otHrs + sp.otHrs };
+            }, { regHrs: 0, otHrs: 0 });
             totalRegHrs += regHrs;
             totalOCHrs  += ocHrs;
             const isToday = sameDay(day, now);
@@ -1489,11 +1607,11 @@ function PunchCard() {
                       {regHrs > 0 && <div style={{ fontSize: 14, color: "#5dba8a" }}>{fmtHrs(regHrs * 3600000)}</div>}
                       {ocHrs  > 0 && <div style={{ fontSize: 14, color: "#e07070" }}>{fmtHrs(ocHrs  * 3600000)}</div>}
                       <div style={{ fontSize: 14, color: "#d4b84a" }}>
-                        {fmtPay(regHrs, settings.regularRate) !== "$0.00" || fmtPay(ocHrs, settings.oncallRate) !== "$0.00"
+                        {privacyMode ? PRIV : (fmtPay(regHrs, settings.regularRate) !== "$0.00" || fmtPay(ocHrs, settings.oncallRate) !== "$0.00"
                           ? (regHrs > 0 && ocHrs > 0
                               ? `${fmtPay(regHrs, settings.regularRate)} + ${fmtPay(ocHrs, settings.oncallRate)}`
                               : regHrs > 0 ? fmtPay(regHrs, settings.regularRate) : fmtPay(ocHrs, settings.oncallRate))
-                          : ""}
+                          : "")}
                       </div>
                     </div>
                   )}
@@ -1554,20 +1672,20 @@ function PunchCard() {
               </div>
               <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
                 <div className="stat-box">
-                  <div className="stat-num" style={{ color: "#d4b84a", fontSize: 20 }}>{fmtPay(totalRegHrs, settings.regularRate)}</div>
+                  <div className="stat-num" style={{ color: "#d4b84a", fontSize: 20 }}>{fpay(totalRegHrs, settings.regularRate)}</div>
                   <div className="stat-lbl">Regular Pay</div>
                 </div>
                 <div className="stat-box">
-                  <div className="stat-num" style={{ color: "#d4b84a", fontSize: 20 }}>{fmtPay(totalOCHrs, settings.oncallRate)}</div>
+                  <div className="stat-num" style={{ color: "#d4b84a", fontSize: 20 }}>{fpay(totalOCHrs, settings.oncallRate)}</div>
                   <div className="stat-lbl">Overtime Pay</div>
                 </div>
               </div>
               <div className="stat-box" style={{ marginBottom: 20 }}>
-                <div className="stat-num" style={{ color: "#d4b84a" }}>{fmtPay(totalPay, 1)}</div>
+                <div className="stat-num" style={{ color: "#d4b84a" }}>{$p(fmtPay(totalPay, 1))}</div>
                 <div className="stat-lbl">Total Earned This Period</div>
                 {projectedPay !== null && projectedPay > totalPay && (
                   <div style={{ fontSize: 14, color: "#b09060", marginTop: 6 }}>
-                    Projected: ~{fmtPay(projectedPay, 1)} based on {workdaysSoFar} workday{workdaysSoFar !== 1 ? "s" : ""} so far
+                    Projected: ~{$p(fmtPay(projectedPay, 1))} based on {workdaysSoFar} workday{workdaysSoFar !== 1 ? "s" : ""} so far
                   </div>
                 )}
               </div>
@@ -1586,16 +1704,16 @@ function PunchCard() {
                     <div style={{ fontSize: 13, color: "#8a7840", letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>Year {new Date().getFullYear()} to date</div>
                     <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
                       <div className="stat-box" style={{ flex: 1 }}>
-                        <div className="stat-num" style={{ color: "#5dba8a", fontSize: 18 }}>{fmtPay(ytd.regGross, 1)}</div>
+                        <div className="stat-num" style={{ color: "#5dba8a", fontSize: 18 }}>{fpay(ytd.regGross, 1)}</div>
                         <div className="stat-lbl">YTD Regular</div>
                       </div>
                       <div className="stat-box" style={{ flex: 1 }}>
-                        <div className="stat-num" style={{ color: "#e07070", fontSize: 18 }}>{fmtPay(ytd.ocGross, 1)}</div>
+                        <div className="stat-num" style={{ color: "#e07070", fontSize: 18 }}>{fpay(ytd.ocGross, 1)}</div>
                         <div className="stat-lbl">YTD Overtime</div>
                       </div>
                     </div>
                     <div className="stat-box" style={{ marginBottom: 20 }}>
-                      <div className="stat-num" style={{ color: "#d4b84a", fontSize: 22 }}>{fmtPay(ytd.total, 1)}</div>
+                      <div className="stat-num" style={{ color: "#d4b84a", fontSize: 22 }}>{$p(fmtPay(ytd.total, 1))}</div>
                       <div className="stat-lbl">YTD Total Gross</div>
                     </div>
 
@@ -1613,14 +1731,14 @@ function PunchCard() {
                           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, marginBottom: 3 }}>
                             <span style={{ color: hit ? "#5dba8a" : "#b09060", letterSpacing: 1 }}>{label}</span>
                             <span style={{ color: hit ? "#5dba8a" : "#a09060", fontFamily: "'Oswald', sans-serif" }}>
-                              {hit ? "✓ CAP HIT" : `${fmtPay(remaining, 1)} to cap`}
+                              {hit ? "✓ CAP HIT" : `${$p(fmtPay(remaining, 1))} to cap`}
                             </span>
                           </div>
                           <div className="wage-bar-wrap">
                             <div className="wage-bar" style={{ width: `${pct}%`, background: hit ? "#5dba8a" : pct > 75 ? "#d4b84a" : "#3a5a3a" }} />
                           </div>
                           <div style={{ fontSize: 9, color: "#7a6838", marginTop: 3, letterSpacing: 1 }}>
-                            {fmtPay(ytd.total, 1)} / {fmtPay(cap, 1)} cap · {hit ? desc : `${pct.toFixed(0)}%`}
+                            {$p(fmtPay(ytd.total, 1))} / {$p(fmtPay(cap, 1))} cap · {hit ? desc : `${pct.toFixed(0)}%`}
                           </div>
                         </div>
                       );
@@ -1636,7 +1754,7 @@ function PunchCard() {
                 const row = (label, amount, color = "#a09060", bold = false) => (
                   <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #2a2510", fontSize: bold ? 17 : 14 }}>
                     <span style={{ color: "#b09060", letterSpacing: 1 }}>{label}</span>
-                    <span style={{ color, fontWeight: bold ? 700 : 400 }}>{typeof amount === "number" ? fmtPay(amount, 1) : amount}</span>
+                    <span style={{ color, fontWeight: bold ? 700 : 400 }}>{typeof amount === "number" ? $p(fmtPay(amount, 1)) : amount}</span>
                   </div>
                 );
                 return (
@@ -1669,7 +1787,7 @@ function PunchCard() {
                         <div style={{ borderTop: "2px solid #3a3218", marginTop: 4, padding: "12px 0" }}>
                           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                             <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 13, letterSpacing: 3, color: "#5dba8a", textTransform: "uppercase" }}>Est. Net Pay</span>
-                            <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 28, color: "#5dba8a", fontWeight: 700 }}>{fmtPay(Math.max(0, pc.netPay), 1)}</span>
+                            <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 28, color: "#5dba8a", fontWeight: 700 }}>{$p(fmtPay(Math.max(0, pc.netPay), 1))}</span>
                           </div>
                           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 14, color: "#8a7840" }}>
                             <span>Effective tax rate</span>
@@ -1678,7 +1796,7 @@ function PunchCard() {
                           {projPc && projPc.gross > pc.gross && (
                             <div style={{ marginTop: 10, padding: "8px 10px", background: "#221e10", border: "1px solid #3a3218", fontSize: 14, color: "#b09060", display: "flex", justifyContent: "space-between" }}>
                               <span>Projected net (full period)</span>
-                              <span style={{ color: "#a09060" }}>~{fmtPay(Math.max(0, projPc.netPay), 1)}</span>
+                              <span style={{ color: "#a09060" }}>~{$p(fmtPay(Math.max(0, projPc.netPay), 1))}</span>
                             </div>
                           )}
                         </div>
@@ -1721,64 +1839,301 @@ function PunchCard() {
               <div style={{ color: "#7a6838", fontSize: 15, letterSpacing: 2, textTransform: "uppercase", textAlign: "center", marginTop: 60 }}>No shifts logged yet</div>
             )}
 
-            {editShift && (
-              <div style={{ background: "#221e10", border: "1px solid #d4b84a", padding: 16, marginBottom: 16 }}>
-                <div style={{ fontSize: 13, color: "#d4b84a", letterSpacing: 2, marginBottom: 12, textTransform: "uppercase" }}>Edit Shift</div>
-                <div style={{ marginBottom: 10 }}>
-                  <div style={{ fontSize: 13, color: "#b09060", marginBottom: 4, letterSpacing: 1 }}>CLOCK IN</div>
-                  <input type="datetime-local" className="edit-input"
-                    value={new Date(editShift.clockIn - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}
-                    onChange={e => setEditShift(p => ({ ...p, clockIn: new Date(e.target.value).getTime() }))}
-                  />
-                </div>
-                <div style={{ marginBottom: 10 }}>
-                  <div style={{ fontSize: 13, color: "#b09060", marginBottom: 4, letterSpacing: 1 }}>CLOCK OUT</div>
-                  <input type="datetime-local" className="edit-input"
-                    value={editShift.clockOut ? new Date(editShift.clockOut - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ""}
-                    onChange={e => setEditShift(p => ({ ...p, clockOut: e.target.value ? new Date(e.target.value).getTime() : null }))}
-                  />
-                </div>
-                <div style={{ marginBottom: 10 }}>
-                  <div style={{ fontSize: 13, color: "#b09060", marginBottom: 4, letterSpacing: 1 }}>LUNCH OVERRIDE (min)</div>
-                  <input type="number" min="0" max="120" step="5" className="edit-input"
-                    value={editShift.lunchDuration ? Math.round(editShift.lunchDuration / 60000) : ""}
-                    placeholder={`auto (${settings.autoLunch !== false ? settings.lunchMinutes || 30 : 0}m)`}
-                    onChange={e => setEditShift(p => ({ ...p, lunchDuration: e.target.value ? parseInt(e.target.value) * 60000 : 0 }))} />
-                </div>
-                <div style={{ marginBottom: 12 }}>
-                  <div style={{ fontSize: 13, color: "#b09060", marginBottom: 4, letterSpacing: 1 }}>NOTE</div>
-                  <input className="edit-input" value={editShift.note || ""} onChange={e => setEditShift(p => ({ ...p, note: e.target.value }))} placeholder="Optional note…" />
-                </div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button className="save-btn" style={{ fontSize: 13, padding: "8px 20px" }} onClick={saveEdit}>Save</button>
-                  <button className="action-btn" onClick={() => setEditShift(null)}>Cancel</button>
-                </div>
-              </div>
-            )}
-
-            {shifts.map(shift => (
-              <div key={shift.id} className="shift-row">
-                <span className={`badge ${shift.type}`}>{shift.type === "regular" ? "REG" : "Overtime"}</span>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 15 }}>
-                    {new Date(shift.clockIn).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+            {(() => {
+              const sorted = [...shifts].sort((a, b) => b.clockIn - a.clockIn);
+              const groups = [];
+              const seenWeeks = new Map();
+              for (const shift of sorted) {
+                const ws = weekStart(new Date(shift.clockIn)).getTime();
+                if (!seenWeeks.has(ws)) { seenWeeks.set(ws, groups.length); groups.push({ ws, shifts: [] }); }
+                groups[seenWeeks.get(ws)].shifts.push(shift);
+              }
+              return groups.map(({ ws, shifts: wShifts }) => {
+                const wEnd    = new Date(ws + 6 * 86400000);
+                const wPay    = calcWeekPay(wShifts.filter(s => s.clockOut), settings, lunchMs);
+                const wHrs    = wShifts.filter(s => s.clockOut).reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
+                const wLabel  = new Date(ws).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+                const wELabel = wEnd.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+                return (
+                  <div key={ws} style={{ marginBottom: 28 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", paddingBottom: 8, borderBottom: "2px solid #3a3218", marginBottom: 4 }}>
+                      <div>
+                        <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 14, letterSpacing: 3, color: "#b09060", textTransform: "uppercase" }}>Week of {wLabel}</div>
+                        <div style={{ fontSize: 12, color: "#4a4020", letterSpacing: 1, marginTop: 2 }}>{wLabel} – {wELabel}</div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 16, color: "#d4b84a" }}>{$p(`$${wPay.total.toFixed(2)}`)}</div>
+                        <div style={{ fontSize: 12, color: "#6a5f38", letterSpacing: 1, marginTop: 1 }}>{fmtHrs(wHrs * 3600000)}</div>
+                      </div>
+                    </div>
+                    {wShifts.map(shift => (
+                      <div key={shift.id} className="shift-row">
+                        <span className={`badge ${shift.type}`}>{shift.type === "regular" ? "REG" : "OC"}</span>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 15 }}>
+                            {new Date(shift.clockIn).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                          </div>
+                          <div style={{ fontSize: 14, color: "#b09060", marginTop: 2 }}>
+                            {fmtTime(shift.clockIn)} → {shift.clockOut ? fmtTime(shift.clockOut) : <span className="incomplete">OPEN</span>}
+                          </div>
+                          {shift.note && <div style={{ fontSize: 13, color: "#9a8850", marginTop: 2 }}>{shift.note}</div>}
+                        </div>
+                        <div style={{ textAlign: "right", marginRight: 8 }}>
+                          <div style={{ fontSize: 14, color: "#d4b84a" }}>{fmtHrs(shiftNetMs(shift, lunchMs))}</div>
+                          <div style={{ fontSize: 13, color: "#7a6838", marginTop: 2 }}>{$p(`$${(shiftNetHrs(shift, lunchMs) * (shift.type === "regular" ? settings.regularRate : settings.oncallRate)).toFixed(2)}`)}</div>
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                          <button className="action-btn" style={{ padding: "5px 14px", fontSize: 13, letterSpacing: 1 }} onClick={() => setEditShift({ ...shift })}>Edit</button>
+                          <button className="action-btn danger" style={{ padding: "5px 14px", fontSize: 13 }} onClick={() => deleteShift(shift.id)}>×</button>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                  <div style={{ fontSize: 14, color: "#b09060", marginTop: 2 }}>
-                    {fmtTime(shift.clockIn)} → {shift.clockOut ? fmtTime(shift.clockOut) : <span className="incomplete">OPEN</span>}
-                    {shift.type === "regular" && shift.clockOut && <span style={{ color: "#8a7840" }}> (−30m lunch)</span>}
-                  </div>
-                  {shift.note && <div style={{ fontSize: 14, color: "#9a8850", marginTop: 2 }}>{shift.note}</div>}
-                </div>
-                <div style={{ textAlign: "right", marginRight: 8 }}>
-                  <div style={{ fontSize: 13, color: "#d4b84a" }}>{fmtHrs(shiftNetMs(shift))}</div>
-                  <div style={{ fontSize: 14, color: "#b09060" }}>{fmtPay(shiftNetHrs(shift), shift.type === "regular" ? settings.regularRate : settings.oncallRate)}</div>
-                </div>
-                <button className="action-btn" style={{ marginRight: 4 }} onClick={() => setEditShift({ ...shift })} style={{ marginRight: 4, padding: "5px 14px", fontSize: 13, letterSpacing: 1 }}>Edit</button>
-                <button className="action-btn danger" onClick={() => deleteShift(shift.id)}>×</button>
-              </div>
-            ))}
+                );
+              });
+            })()}
           </div>
         )}
+      </div>
+
+      {/* ── Settings Backdrop ── */}
+      <div className={`settings-backdrop${settingsOpen ? " open" : ""}`} onClick={() => setSettingsOpen(false)} />
+
+      {/* ── Settings Bottom Sheet ── */}
+      <div className={`settings-sheet${settingsOpen ? " open" : ""}`}>
+        <div className="sheet-handle"><div className="sheet-handle-bar" /></div>
+        <div className="sheet-header">
+          <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 16, fontWeight: 600, letterSpacing: 3, color: "#b09060", textTransform: "uppercase" }}>Settings</div>
+          <button className="sheet-close" onClick={() => setSettingsOpen(false)}>×</button>
+        </div>
+        <div style={{ padding: "0 20px 8px" }}>
+          <div style={{ fontSize: 14, letterSpacing: 3, color: "#b09060", marginBottom: 16, textTransform: "uppercase" }}>Hourly Rates</div>
+          <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Regular Start</div>
+              <input type="time" className="settings-input" value={regStartInput} onChange={e => setRegStartInput(e.target.value)} />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Regular End</div>
+              <input type="time" className="settings-input" value={regEndInput} onChange={e => setRegEndInput(e.target.value)} />
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Regular Rate ($/hr)</div>
+              <input className="settings-input" value={rateInput.regularRate} onChange={e => setRateInput(p => ({ ...p, regularRate: e.target.value }))} placeholder="18.00" />
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Overtime Rate ($/hr)</div>
+              <input className="settings-input" value={rateInput.oncallRate} onChange={e => setRateInput(p => ({ ...p, oncallRate: e.target.value }))} placeholder="27.00" />
+            </div>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Pay Period Anchor Date</div>
+            <input type="date" className="settings-input" value={anchorInput} onChange={e => setAnchorInput(e.target.value)} />
+            <div style={{ fontSize: 13, color: "#8a7840", letterSpacing: 1, marginTop: 6 }}>First day of any known pay period — used to calculate all future periods</div>
+          </div>
+          <div style={{ display: "flex", gap: 12, marginBottom: 16 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Filing Status</div>
+              <select className="settings-input" value={filingInput} onChange={e => setFilingInput(e.target.value)} style={{ appearance: "none", cursor: "pointer" }}>
+                <option value="single">Single</option>
+                <option value="married">Married (MFJ)</option>
+              </select>
+            </div>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Pre-Tax / Period</div>
+              <input className="settings-input" placeholder="0.00" value={preTaxInput} onChange={e => setPreTaxInput(e.target.value)} />
+              <div style={{ fontSize: 13, color: "#8a7840", marginTop: 4 }}>401k, health ins., FSA</div>
+            </div>
+          </div>
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 10, textTransform: "uppercase" }}>Auto Lunch Deduction</div>
+            <div style={{ display: "flex", gap: 12, alignItems: "flex-end" }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Auto-Deduct</div>
+                <div style={{ display: "flex" }}>
+                  <button onClick={() => setAutoLunchInput(true)} style={{ flex: 1, padding: "9px", background: autoLunchInput ? "#1a3d2a" : "#221e10", border: "1px solid", borderColor: autoLunchInput ? "#5dba8a" : "#3a3218", color: autoLunchInput ? "#5dba8a" : "#a09060", fontFamily: "'Courier Prime', monospace", fontSize: 13, letterSpacing: 1, cursor: "pointer" }}>ON</button>
+                  <button onClick={() => setAutoLunchInput(false)} style={{ flex: 1, padding: "9px", background: !autoLunchInput ? "#3d1a1a" : "#221e10", border: "1px solid", borderLeft: "none", borderColor: !autoLunchInput ? "#e07070" : "#3a3218", color: !autoLunchInput ? "#e07070" : "#a09060", fontFamily: "'Courier Prime', monospace", fontSize: 13, letterSpacing: 1, cursor: "pointer" }}>OFF</button>
+                </div>
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, color: autoLunchInput ? "#b09060" : "#5a5030", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Duration (min)</div>
+                <input className="settings-input" type="number" min="0" max="120" step="5" value={lunchMinInput} onChange={e => setLunchMinInput(e.target.value)} disabled={!autoLunchInput} style={{ opacity: autoLunchInput ? 1 : 0.4 }} placeholder="30" />
+              </div>
+            </div>
+            <div style={{ fontSize: 13, color: "#8a7840", letterSpacing: 1, marginTop: 6 }}>
+              {autoLunchInput ? `${lunchMinInput || 30}-min lunch auto-deducted from regular shifts` : "No auto deduction — hours counted as clocked"}
+            </div>
+          </div>
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 6, textTransform: "uppercase" }}>Daily OT Threshold (hours)</div>
+            <input className="settings-input" type="number" min="1" max="24" step="0.5" value={dailyOtInput} onChange={e => setDailyOtInput(e.target.value)} placeholder="8" />
+            <div style={{ fontSize: 13, color: "#8a7840", letterSpacing: 1, marginTop: 6 }}>
+              Regular shifts longer than {dailyOtInput || 8}h auto-split: first {dailyOtInput || 8}h at regular rate, remainder at OT rate
+            </div>
+          </div>
+          <button className="save-btn" style={{ width: "100%" }} onClick={saveSettings}>Save Settings</button>
+          <div style={{ borderTop: "1px solid #2a2510", marginTop: 20, paddingTop: 16, marginBottom: 4 }}>
+            <div style={{ fontSize: 14, letterSpacing: 3, color: "#b09060", marginBottom: 12, textTransform: "uppercase" }}>Data</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <button className="action-btn" style={{ textAlign: "left", padding: "10px 14px", color: "#b09060", borderColor: "#3a3218" }} onClick={exportBackup}>↓ Export Backup (.json)</button>
+              <button className="action-btn" style={{ textAlign: "left", padding: "10px 14px", color: "#b09060", borderColor: "#3a3218" }} onClick={() => importFileRef.current?.click()}>↑ Import Backup (.json)</button>
+              <input ref={importFileRef} type="file" accept=".json" style={{ display: "none" }} onChange={e => { importBackup(e.target.files[0]); e.target.value = ""; }} />
+              {importStatus === "ok" && <div style={{ fontSize: 14, color: "#5dba8a", letterSpacing: 1 }}>✓ Backup restored successfully</div>}
+              {importStatus === "err" && <div style={{ fontSize: 14, color: "#e07070", letterSpacing: 1 }}>✗ Invalid backup file</div>}
+              <button className="action-btn" style={{ textAlign: "left", padding: "10px 14px", color: "#b09060", borderColor: "#3a3218" }} onClick={exportExcel}>↓ Export to Excel (.xlsx)</button>
+            </div>
+          </div>
+
+          {/* ── About ── */}
+          <div style={{ borderTop: "1px solid #2a2510", marginTop: 20, paddingTop: 16 }}>
+            <button
+              onClick={() => setShowAbout(p => !p)}
+              style={{ width: "100%", background: "none", border: "none", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", padding: 0, marginBottom: showAbout ? 14 : 0 }}
+            >
+              <div style={{ fontSize: 14, letterSpacing: 3, color: "#b09060", textTransform: "uppercase" }}>About</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ fontSize: 12, color: "#4a4020", letterSpacing: 1, fontFamily: "'Courier Prime', monospace" }}>v{APP_VERSION}</div>
+                <div style={{ fontSize: 14, color: "#4a4020" }}>{showAbout ? "▲" : "▼"}</div>
+              </div>
+            </button>
+            {showAbout && (
+              <>
+                {[
+                  ["Auto OT split",     "Shifts over 8h auto-split into regular + OT pay"],
+                  ["FLSA weekly cap",   "40h/week threshold — OT rate kicks in automatically"],
+                  ["Live ticker",       "Earnings tick up in real time while clocked in"],
+                  ["Daily OT bar",      "Visual progress toward your 8h daily threshold"],
+                  ["Privacy mode",      "HIDE/SHOW toggle masks all dollar amounts instantly"],
+                  ["Undo on delete",    "5-second window to recover a deleted shift"],
+                  ["Edit bottom sheet", "Edit any shift without losing your scroll position"],
+                  ["Week-grouped log",  "Log tab groups shifts by week with pay totals"],
+                  ["Auto lunch",        "Configurable auto-deduction from regular shifts"],
+                  ["NJ tax estimate",   "Per-period net pay estimate with full NJ + Federal breakdown"],
+                  ["Biweekly periods",  "14-day pay period tracking with projected earnings"],
+                  ["CSV + Excel export","Full timesheet export with per-shift and weekly breakdowns"],
+                  ["Backup & restore",  "JSON backup keeps your data safe across devices"],
+                ].map(([title, desc]) => (
+                  <div key={title} style={{ display: "flex", gap: 10, paddingBottom: 10, marginBottom: 10, borderBottom: "1px solid #1e1c0e" }}>
+                    <div style={{ width: 6, flexShrink: 0, marginTop: 5, height: 6, borderRadius: "50%", background: "#3a3218" }} />
+                    <div>
+                      <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 1, marginBottom: 1 }}>{title}</div>
+                      <div style={{ fontSize: 12, color: "#4a4020", letterSpacing: 0.5, lineHeight: 1.5 }}>{desc}</div>
+                    </div>
+                  </div>
+                ))}
+                <div style={{ fontSize: 11, color: "#3a3218", letterSpacing: 1, textAlign: "center", paddingTop: 4 }}>
+                  Built for NJ hourly workers · Parsippany
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Edit Shift Backdrop ── */}
+      <div className={`edit-backdrop${editShift ? " open" : ""}`} onClick={() => setEditShift(null)} />
+
+      {/* ── Edit Shift Bottom Sheet ── */}
+      <div className={`edit-sheet${editShift ? " open" : ""}`}>
+        <div className="sheet-handle"><div className="sheet-handle-bar" /></div>
+        <div className="sheet-header">
+          <div>
+            <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 16, fontWeight: 600, letterSpacing: 3, color: "#b09060", textTransform: "uppercase" }}>Edit Shift</div>
+            {editShift && (
+              <div style={{ fontSize: 12, color: "#5a5030", letterSpacing: 1, marginTop: 3 }}>
+                {new Date(editShift.clockIn).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" })}
+                {" · "}{fmtTime(editShift.clockIn)}
+              </div>
+            )}
+          </div>
+          <button className="sheet-close" onClick={() => setEditShift(null)}>×</button>
+        </div>
+        {editShift && (
+          <div style={{ padding: "0 20px 8px" }}>
+            {/* Shift type toggle */}
+            <div style={{ marginBottom: 18 }}>
+              <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, marginBottom: 8, textTransform: "uppercase" }}>Shift Type</div>
+              <div style={{ display: "flex" }}>
+                <button
+                  onClick={() => setEditShift(p => ({ ...p, type: "regular" }))}
+                  style={{ flex: 1, padding: "11px", background: editShift.type === "regular" ? "#1a3d2a" : "#221e10", border: "1px solid", borderColor: editShift.type === "regular" ? "#5dba8a" : "#3a3218", color: editShift.type === "regular" ? "#5dba8a" : "#a09060", fontFamily: "'Oswald', sans-serif", fontSize: 13, letterSpacing: 2, cursor: "pointer", textTransform: "uppercase" }}>
+                  Regular
+                </button>
+                <button
+                  onClick={() => setEditShift(p => ({ ...p, type: "oncall" }))}
+                  style={{ flex: 1, padding: "11px", background: editShift.type === "oncall" ? "#3d1a1a" : "#221e10", border: "1px solid", borderLeft: "none", borderColor: editShift.type === "oncall" ? "#e07070" : "#3a3218", color: editShift.type === "oncall" ? "#e07070" : "#a09060", fontFamily: "'Oswald', sans-serif", fontSize: 13, letterSpacing: 2, cursor: "pointer", textTransform: "uppercase" }}>
+                  Overtime
+                </button>
+              </div>
+            </div>
+            {/* Clock In */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 13, color: "#b09060", marginBottom: 5, letterSpacing: 1 }}>Clock In</div>
+              <input type="datetime-local" className="edit-input"
+                value={new Date(editShift.clockIn - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16)}
+                onChange={e => setEditShift(p => ({ ...p, clockIn: new Date(e.target.value).getTime() }))} />
+            </div>
+            {/* Clock Out */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 13, color: "#b09060", marginBottom: 5, letterSpacing: 1 }}>Clock Out</div>
+              <input type="datetime-local" className="edit-input"
+                value={editShift.clockOut ? new Date(editShift.clockOut - new Date().getTimezoneOffset() * 60000).toISOString().slice(0, 16) : ""}
+                onChange={e => setEditShift(p => ({ ...p, clockOut: e.target.value ? new Date(e.target.value).getTime() : null }))} />
+            </div>
+            {/* Lunch override */}
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 13, color: "#b09060", marginBottom: 5, letterSpacing: 1 }}>Lunch Override (min)</div>
+              <input type="number" min="0" max="120" step="5" className="edit-input"
+                value={editShift.lunchDuration ? Math.round(editShift.lunchDuration / 60000) : ""}
+                placeholder={`auto (${settings.autoLunch !== false ? settings.lunchMinutes || 30 : 0}m)`}
+                onChange={e => setEditShift(p => ({ ...p, lunchDuration: e.target.value ? parseInt(e.target.value) * 60000 : 0 }))} />
+            </div>
+            {/* Note */}
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 13, color: "#b09060", marginBottom: 5, letterSpacing: 1 }}>Note</div>
+              <input className="edit-input" value={editShift.note || ""} onChange={e => setEditShift(p => ({ ...p, note: e.target.value }))} placeholder="Optional note…" />
+            </div>
+            <button className="save-btn" style={{ width: "100%" }} onClick={saveEdit}>Save Changes</button>
+          </div>
+        )}
+      </div>
+
+      {/* ── Undo Toast ── */}
+      <div className={`undo-toast${pendingDelete ? " visible" : ""}`}>
+        <div style={{ background: "#1a1810", border: "1px solid #4a4020", borderRadius: 999, overflow: "hidden", boxShadow: "0 8px 32px rgba(0,0,0,0.6)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 10px 10px 18px" }}>
+            <span style={{ fontSize: 13, color: "#a09060", letterSpacing: 1, fontFamily: "'Courier Prime', monospace" }}>
+              Shift removed
+            </span>
+            <button
+              onClick={undoDelete}
+              style={{
+                display: "flex", alignItems: "center", gap: 7,
+                background: "#d4b84a", color: "#1a1508",
+                border: "none", borderRadius: 999,
+                padding: "7px 14px 7px 16px",
+                fontFamily: "'Oswald', sans-serif",
+                fontSize: 13, fontWeight: 700, letterSpacing: 2,
+                cursor: "pointer", textTransform: "uppercase", lineHeight: 1,
+              }}
+            >
+              Undo
+              <span style={{
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                width: 20, height: 20, borderRadius: "50%",
+                background: "rgba(26,21,8,0.25)",
+                fontSize: 12, fontWeight: 700, letterSpacing: 0,
+              }}>
+                {pendingDelete?.secondsLeft ?? 5}
+              </span>
+            </button>
+          </div>
+          {pendingDelete && (
+            <div key={pendingDelete.shift.id} style={{ height: 3, background: "#d4b84a", transformOrigin: "left", animation: "undoBar 5s linear forwards" }} />
+          )}
+        </div>
       </div>
     </div>
   );
