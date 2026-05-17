@@ -188,24 +188,6 @@ function getPeriodDays(anchorStr, now = new Date()) {
 
 // ── Tax Engine (2025 rates) ───────────────────────────────────
 
-function applyBrackets(taxable, brackets) {
-  let tax = 0;
-  for (const [limit, rate, base] of brackets) {
-    if (taxable <= 0) break;
-    const prev = base;
-    if (taxable > (limit ?? Infinity)) {
-      // Not the top bracket — move on
-    } else {
-      // Taxable falls in this bracket
-      tax = prev + taxable * rate;
-      return tax;
-    }
-  }
-  // Top bracket
-  const top = brackets[brackets.length - 1];
-  return top[2] + taxable * top[1];
-}
-
 // Federal income tax — annualized income, after standard deduction
 const FED_BRACKETS = {
   single: [
@@ -325,13 +307,14 @@ function calcPaycheck(grossPeriod, filingStatus, preTaxPerPeriod) {
 
 // ── CSV Export ───────────────────────────────────────────────
 function exportCSV(shifts, settings) {
+  const lunchMs = settings.autoLunch !== false ? (settings.lunchMinutes || 30) * 60000 : 0;
   const rows = [
     ["Date", "Day", "Type", "Clock In", "Clock Out", "Net Hours", "Gross Pay", "Note"],
   ];
   const sorted = [...shifts].sort((a, b) => a.clockIn - b.clockIn);
   for (const s of sorted) {
     const d = new Date(s.clockIn);
-    const hrs = shiftNetHrs(s);
+    const hrs = shiftNetHrs(s, lunchMs);
     const pay = hrs * (s.type === "regular" ? settings.regularRate : settings.oncallRate);
     rows.push([
       d.toLocaleDateString("en-US"),
@@ -344,10 +327,9 @@ function exportCSV(shifts, settings) {
       s.note || "",
     ]);
   }
-  // Totals row
-  const totalHrs = sorted.reduce((a, s) => a + shiftNetHrs(s), 0);
+  const totalHrs = sorted.reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
   const totalPay = sorted.reduce((a, s) => {
-    return a + shiftNetHrs(s) * (s.type === "regular" ? settings.regularRate : settings.oncallRate);
+    return a + shiftNetHrs(s, lunchMs) * (s.type === "regular" ? settings.regularRate : settings.oncallRate);
   }, 0);
   rows.push(["TOTAL", "", "", "", "", totalHrs.toFixed(2), totalPay.toFixed(2), ""]);
 
@@ -579,7 +561,11 @@ function PunchCard() {
       setTimeout(() => setFlash(null), 800);
       persist(shifts, newActive, settings);
     } else {
-      const completed = { ...active, clockOut: ts, note: note.trim(), lunchDuration: active.lunchDuration || 0 };
+      // Finalize any ongoing lunch before clocking out
+      const ongoingLunch = active.onLunch ? (ts - active.lunchStart) : 0;
+      const totalLunch = (active.lunchDuration || 0) + ongoingLunch;
+      const completed = { ...active, clockOut: ts, note: note.trim(),
+                          lunchDuration: totalLunch, onLunch: false, lunchStart: null };
       const newShifts = [completed, ...shifts];
       setShifts(newShifts);
       setActive(null);
@@ -621,7 +607,8 @@ function PunchCard() {
     const inTs  = new Date(`${date}T${clockIn}`).getTime();
     const outTs = new Date(`${date}T${clockOut}`).getTime();
     if (isNaN(inTs) || isNaN(outTs) || outTs <= inTs) return;
-    const shift = { id: crypto.randomUUID(), type, clockIn: inTs, clockOut: outTs, note: note.trim() };
+    const shift = { id: crypto.randomUUID(), type, clockIn: inTs, clockOut: outTs,
+                    lunchDuration: 0, onLunch: false, lunchStart: null, note: note.trim() };
     const updated = [shift, ...shifts].sort((a, b) => b.clockIn - a.clockIn);
     setShifts(updated);
     setShowManualEntry(false);
@@ -695,17 +682,21 @@ function PunchCard() {
   function exportExcel() {
     const XLSX = window.XLSX;
     if (!XLSX) { alert("Excel library not loaded. Check your connection."); return; }
+    const lunchMs = settings.autoLunch !== false ? (settings.lunchMinutes || 30) * 60000 : 0;
     const wb = XLSX.utils.book_new();
 
     // ── Sheet 1: All Shifts ──────────────────────────────────
     const sorted = [...shifts].sort((a, b) => a.clockIn - b.clockIn);
     const shiftRows = [["Date","Day","Type","Clock In","Clock Out","Gross Hrs","Lunch Hrs","Net Hrs","Rate","Gross Pay","Note"]];
     for (const s of sorted) {
-      const d   = new Date(s.clockIn);
-      const hrs = shiftNetHrs(s);
+      const d    = new Date(s.clockIn);
+      const hrs  = shiftNetHrs(s, lunchMs);
       const rate = s.type === "regular" ? settings.regularRate : settings.oncallRate;
-      const lunchHrs = s.lunchDuration ? (s.lunchDuration / 3600000).toFixed(2)
-        : s.type === "regular" ? "0.50" : "0.00";
+      const lunchHrs = s.lunchDuration > 0
+        ? (s.lunchDuration / 3600000).toFixed(2)
+        : (s.type === "regular" && settings.autoLunch !== false)
+          ? ((settings.lunchMinutes || 30) / 60).toFixed(2)
+          : "0.00";
       const grossHrs = s.clockOut ? ((s.clockOut - s.clockIn) / 3600000).toFixed(2) : "OPEN";
       shiftRows.push([
         d.toLocaleDateString("en-US"),
@@ -720,28 +711,24 @@ function PunchCard() {
         s.note || ""
       ]);
     }
-    // Totals row
-    const totHrs  = sorted.reduce((a, s) => a + shiftNetHrs(s), 0);
-    const totPay  = sorted.reduce((a, s) => a + shiftNetHrs(s) * (s.type === "regular" ? settings.regularRate : settings.oncallRate), 0);
+    const totHrs = sorted.reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
+    const totPay = sorted.reduce((a, s) => a + shiftNetHrs(s, lunchMs) * (s.type === "regular" ? settings.regularRate : settings.oncallRate), 0);
     shiftRows.push(["TOTAL","","","","","","",totHrs.toFixed(2),"",totPay.toFixed(2),""]);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(shiftRows), "Shifts");
 
-    // ── Sheet 2: Weekly Summary ───────────────────────────────
-    const weekMap = {};
+    // ── Sheet 2: Weekly Summary (FLSA-correct via calcWeekPay) ─
+    const weekGroups = {};
     for (const s of sorted) {
-      const ws  = weekStart(new Date(s.clockIn));
-      const key = ws.toISOString().slice(0,10);
-      if (!weekMap[key]) weekMap[key] = { regHrs:0, ocHrs:0, regPay:0, ocPay:0 };
-      const hrs = shiftNetHrs(s);
-      if (s.type === "regular") { weekMap[key].regHrs += hrs; weekMap[key].regPay += hrs * settings.regularRate; }
-      else                      { weekMap[key].ocHrs  += hrs; weekMap[key].ocPay  += hrs * settings.oncallRate;  }
+      const key = weekStart(new Date(s.clockIn)).toISOString().slice(0, 10);
+      if (!weekGroups[key]) weekGroups[key] = [];
+      weekGroups[key].push(s);
     }
-    const weekRows = [["Week Starting","Regular Hrs","Overtime Hrs","Total Hrs","Regular Pay","Overtime Pay","Total Pay","OT Flag"]];
-    for (const [key, v] of Object.entries(weekMap)) {
-      const tot = v.regHrs + v.ocHrs;
-      weekRows.push([key, v.regHrs.toFixed(2), v.ocHrs.toFixed(2), tot.toFixed(2),
-        v.regPay.toFixed(2), v.ocPay.toFixed(2), (v.regPay + v.ocPay).toFixed(2),
-        tot > 40 ? "OVERTIME" : ""]);
+    const weekRows = [["Week Starting","Regular Hrs","OT Hrs","Total Hrs","Regular Pay","OT Pay","Total Pay"]];
+    for (const [key, wShifts] of Object.entries(weekGroups)) {
+      const wp  = calcWeekPay(wShifts, settings, lunchMs);
+      const tot = wp.regHrs + wp.otHrs;
+      weekRows.push([key, wp.regHrs.toFixed(2), wp.otHrs.toFixed(2), tot.toFixed(2),
+        wp.regPay.toFixed(2), wp.otPay.toFixed(2), wp.total.toFixed(2)]);
     }
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(weekRows), "Weekly Summary");
 
@@ -830,7 +817,6 @@ function PunchCard() {
   // ── Today (weekly OT model) ──────────────────────────────────
   const todayShifts    = shifts.filter(s => sameDay(s.clockIn, now));
   const preTodayShifts = weekShifts.filter(s => !sameDay(s.clockIn, now));
-  const preTodayHrs    = preTodayShifts.reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
   const preTodayRegHrs = preTodayShifts.reduce((a, s) => a + shiftSplit(s, settings, lunchMs).regHrs, 0);
   const todayCompleted = todayShifts.filter(s => s.clockOut);
   let _cumReg = preTodayRegHrs, todayRegHrs = 0, todayOTHrs = 0;
@@ -896,8 +882,8 @@ function PunchCard() {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&family=Oswald:wght@400;600;700&display=swap');
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        ::-webkit-scrollbar { width: 3px; }
-        ::-webkit-scrollbar-thumb { background: #3a3520; }
+        ::-webkit-scrollbar { display: none; }
+        * { -ms-overflow-style: none; scrollbar-width: none; }
 
         .card { background: #f5f0df; color: #1a1508; border-radius: 2px; }
 
@@ -919,6 +905,7 @@ function PunchCard() {
         .punch-btn.flash-out { background: #f0a8a8 !important; color: #2a0d0d !important; }
 
         .tab-btn {
+          -webkit-appearance: none; appearance: none;
           background: none; border: none; color: #b09060; cursor: pointer;
           font-family: 'Oswald', sans-serif; font-size: 13px; letter-spacing: 2px;
           text-transform: uppercase; padding: 10px 16px;
@@ -949,6 +936,7 @@ function PunchCard() {
         .stat-lbl { font-size: 13px; letter-spacing: 2px; color: #a09060; text-transform: uppercase; margin-top: 4px; font-weight: 700; }
 
         .action-btn {
+          -webkit-appearance: none; appearance: none;
           background: none; border: 1px solid #3a3218; color: #a09060;
           padding: 6px 14px; font-family: 'Courier Prime', monospace;
           font-size: 11px; cursor: pointer; letter-spacing: 1px;
@@ -965,6 +953,7 @@ function PunchCard() {
         .settings-input:focus { border-color: #d4b84a; }
 
         .save-btn {
+          -webkit-appearance: none; appearance: none;
           background: #d4b84a; color: #1a1508; border: none;
           font-family: 'Oswald', sans-serif; font-size: 13px;
           font-weight: 700; letter-spacing: 3px; text-transform: uppercase;
@@ -1051,6 +1040,7 @@ function PunchCard() {
           border-bottom: 1px solid #2a2510; margin-bottom: 20px;
         }
         .sheet-close {
+          -webkit-appearance: none; appearance: none;
           background: #221e10; border: 1px solid #3a3218; color: #a09060;
           width: 32px; height: 32px; border-radius: 50%;
           font-size: 18px; line-height: 1; cursor: pointer;
@@ -1117,13 +1107,17 @@ function PunchCard() {
           <button
             onClick={() => setPrivacyMode(p => !p)}
             style={{
-              background: privacyMode ? "#3a2a08" : "none",
+              WebkitAppearance: "none",
+              appearance: "none",
+              background: privacyMode ? "#3a2a08" : "transparent",
               border: `1px solid ${privacyMode ? "#d4b84a" : "#3a3218"}`,
-              color: privacyMode ? "#d4b84a" : "#6a5f38",
+              borderRadius: 2,
+              color: privacyMode ? "#d4b84a" : "#5a5030",
               fontFamily: "'Courier Prime', monospace",
-              fontSize: 11, letterSpacing: 2,
-              padding: "4px 9px", cursor: "pointer",
+              fontSize: 10, letterSpacing: 2,
+              padding: "3px 8px", cursor: "pointer",
               textTransform: "uppercase", transition: "all 0.15s",
+              lineHeight: 1.4,
             }}
             title={privacyMode ? "Show dollar amounts" : "Hide dollar amounts"}
           >{privacyMode ? "SHOW" : "HIDE"}</button>
@@ -1481,9 +1475,11 @@ function PunchCard() {
                         <div style={{ textAlign: "right" }}>
                           {regHrs > 0 && <div style={{ fontSize: 15, color: "#5dba8a" }}>{fmtHrs(regHrs * 3600000)}</div>}
                           {ocHrs  > 0 && <div style={{ fontSize: 15, color: "#e07070" }}>{fmtHrs(ocHrs  * 3600000)}</div>}
-                          <div style={{ fontSize: 14, color: "#d4b84a", marginTop: 2 }}>
-                            {$p(fmtPay(regHrs * settings.regularRate + ocHrs * settings.oncallRate > 0 ? 1 : 0, regHrs * settings.regularRate + ocHrs * settings.oncallRate))}
-                          </div>
+                          {(regHrs > 0 || ocHrs > 0) && (
+                            <div style={{ fontSize: 14, color: "#d4b84a", marginTop: 2 }}>
+                              {$p(`$${(regHrs * settings.regularRate + ocHrs * settings.oncallRate).toFixed(2)}`)}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
