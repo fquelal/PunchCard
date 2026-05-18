@@ -75,7 +75,8 @@ const appStorage = {
 };
 
 // ── Constants ────────────────────────────────────────────────
-const STORAGE_KEY = "punchcard-v2";
+const STORAGE_KEY  = "punchcard-v2";
+const DISMISS_KEY  = "punchcard-dismissals";
 const REGULAR_START = 8 * 60;        // 8:00 AM in minutes
 const REGULAR_END   = 16.5 * 60;     // 4:30 PM in minutes
 const LUNCH_MIN     = 30;
@@ -531,6 +532,20 @@ function PunchCard() {
           setAutoLunchInput(d.settings?.autoLunch !== false);
           setLunchMinInput(String(d.settings?.lunchMinutes ?? 30));
           setDailyOtInput(String(d.settings?.dailyOtHours ?? 8));
+        }
+      } catch {}
+      // Load dismissals separately — auto-expire any from a previous week
+      try {
+        const dr = await appStorage.get(DISMISS_KEY);
+        if (dr?.value) {
+          const stored = JSON.parse(dr.value);
+          const thisWeek = weekStart().toDateString();
+          const fresh = {};
+          for (const [k, v] of Object.entries(stored)) {
+            // Keep ytdOpen (persistent UI pref) and any key belonging to THIS week
+            if (k === "ytdOpen" || k.includes(thisWeek)) fresh[k] = v;
+          }
+          setDismissedWarnings(fresh);
         }
       } catch {}
       loaded.current = true;
@@ -1169,7 +1184,11 @@ function PunchCard() {
             {activeWarnings.map(w => (
               <div key={w.id} className="warning-banner" style={{ background: w.bg, border: `1px solid ${w.border}`, color: w.color }}>
                 <span>{w.msg}</span>
-                <button onClick={() => setDismissedWarnings(p => ({ ...p, [w.id]: true }))}
+                <button onClick={() => {
+                    const updated = { ...dismissedWarnings, [w.id]: true };
+                    setDismissedWarnings(updated);
+                    appStorage.set(DISMISS_KEY, JSON.stringify(updated)).catch(() => {});
+                  }}
                   style={{ background: "none", border: "none", color: w.color, cursor: "pointer", fontSize: 16, lineHeight: 1, flexShrink: 0 }}>×</button>
               </div>
             ))}
@@ -1689,11 +1708,80 @@ function PunchCard() {
                 )}
               </div>
 
-              {/* ── YTD + Wage Base Countdowns ── */}
+              {/* ── Est. Net Pay Card (now above YTD) ── */}
+              {totalPay > 0 && (() => {
+                const pc     = calcPaycheck(totalPay, settings.filingStatus || "single", settings.preTaxPerPeriod || 0);
+                const projPc = projectedPay ? calcPaycheck(projectedPay, settings.filingStatus || "single", settings.preTaxPerPeriod || 0) : null;
+                const row = (label, amount, color = "#a09060", bold = false) => (
+                  <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #2a2510", fontSize: bold ? 17 : 14 }}>
+                    <span style={{ color: "#b09060", letterSpacing: 1 }}>{label}</span>
+                    <span style={{ color, fontWeight: bold ? 700 : 400 }}>{typeof amount === "number" ? $p(fmtPay(amount, 1)) : amount}</span>
+                  </div>
+                );
+                return (
+                  <div style={{ marginBottom: 20 }}>
+                    {/* Summary card — always visible, tap to expand */}
+                    <button
+                      onClick={() => setShowPaystub(p => !p)}
+                      style={{ WebkitAppearance: "none", appearance: "none", width: "100%", background: "#221e10", border: "1px solid #3a3218", padding: "14px 16px", cursor: "pointer", textAlign: "left", display: "block" }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                        <div>
+                          <div style={{ fontSize: 11, letterSpacing: 3, color: "#5a7a5a", textTransform: "uppercase", marginBottom: 5 }}>Est. Net Pay</div>
+                          <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 34, fontWeight: 600, color: "#5dba8a", lineHeight: 1 }}>
+                            {$p(fmtPay(Math.max(0, pc.netPay), 1))}
+                          </div>
+                          <div style={{ fontSize: 12, color: "#4a6a4a", letterSpacing: 1, marginTop: 5 }}>
+                            After taxes & deductions · {pc.gross > 0 ? ((pc.totalDeductions - pc.preTax) / pc.gross * 100).toFixed(1) : 0}% rate
+                          </div>
+                        </div>
+                        <div style={{ fontSize: 14, color: "#4a4020", marginTop: 2 }}>{showPaystub ? "▲" : "▼"}</div>
+                      </div>
+                      {projPc && projPc.gross > pc.gross && (
+                        <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #2a2510", display: "flex", justifyContent: "space-between", fontSize: 13, color: "#6a7840" }}>
+                          <span style={{ letterSpacing: 1 }}>Projected full period</span>
+                          <span>~{$p(fmtPay(Math.max(0, projPc.netPay), 1))}</span>
+                        </div>
+                      )}
+                    </button>
+                    {/* Expanded math breakdown */}
+                    {showPaystub && (
+                      <div style={{ background: "#0e0c07", border: "1px solid #3a3218", borderTop: "none", padding: "0 16px 4px" }}>
+                        <div style={{ fontSize: 12, letterSpacing: 2, color: "#8a7840", textTransform: "uppercase", padding: "12px 0 4px" }}>
+                          {(settings.filingStatus === "married" ? "MFJ" : "Single")} · NJ · 2025 estimates · {isCurrentPeriod ? `${workdaysSoFar} workdays logged` : "full period"}
+                        </div>
+                        {row("Gross Pay", pc.gross, "#f0ead8")}
+                        {pc.preTax > 0 && row("Pre-Tax Deductions", -pc.preTax, "#e07070")}
+                        {row("Federal Withholding", -pc.federal, "#e07070")}
+                        {row("Social Security (6.2%)", -pc.ss, "#e07070")}
+                        {row("Medicare (1.45%)", -pc.medicare, "#e07070")}
+                        <div style={{ fontSize: 12, letterSpacing: 2, color: "#8a7840", textTransform: "uppercase", padding: "10px 0 4px" }}>NJ State</div>
+                        {row("NJ Income Tax", -pc.njState, "#e07070")}
+                        {row("NJ SDI (0.26%)", -pc.njSDI, "#c06050")}
+                        {row("NJ FLI (0.09%)", -pc.njFLI, "#c06050")}
+                        {row("NJ SUI/WF (0.425%)", -pc.njSUI, "#c06050")}
+                        <div style={{ borderTop: "2px solid #3a3218", marginTop: 4, padding: "10px 0 6px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 13, letterSpacing: 3, color: "#5dba8a", textTransform: "uppercase" }}>Est. Net Pay</span>
+                          <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 24, color: "#5dba8a", fontWeight: 700 }}>{$p(fmtPay(Math.max(0, pc.netPay), 1))}</span>
+                        </div>
+                        <div style={{ fontSize: 9, color: "#7a6838", paddingBottom: 10, lineHeight: 1.6 }}>
+                          * Estimates only. Based on annualized gross × 26. Does not account for YTD wage base limits, additional W-4 adjustments, or employer benefits. Consult your paystub or HR for exact figures.
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* ── YTD Earnings & Wage Base Caps (now below paycheck) ── */}
               <div style={{ marginBottom: 20 }}>
                 <button
-                  onClick={() => setDismissedWarnings(p => ({ ...p, ytdOpen: !p.ytdOpen }))}
-                  style={{ width: "100%", background: "#221e10", border: "1px solid #3a3218", color: "#a09060", fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: 3, textTransform: "uppercase", padding: "11px 16px", cursor: "pointer", textAlign: "left", display: "flex", justifyContent: "space-between" }}
+                  onClick={() => {
+                    const updated = { ...dismissedWarnings, ytdOpen: !dismissedWarnings.ytdOpen };
+                    setDismissedWarnings(updated);
+                    appStorage.set(DISMISS_KEY, JSON.stringify(updated)).catch(() => {});
+                  }}
+                  style={{ WebkitAppearance: "none", appearance: "none", width: "100%", background: "#221e10", border: "1px solid #3a3218", color: "#a09060", fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: 3, textTransform: "uppercase", padding: "11px 16px", cursor: "pointer", textAlign: "left", display: "flex", justifyContent: "space-between" }}
                 >
                   <span>📊 YTD Earnings & Wage Base Caps</span>
                   <span>{dismissedWarnings.ytdOpen ? "▲" : "▼"}</span>
@@ -1715,8 +1803,6 @@ function PunchCard() {
                       <div className="stat-num" style={{ color: "#d4b84a", fontSize: 22 }}>{$p(fmtPay(ytd.total, 1))}</div>
                       <div className="stat-lbl">YTD Total Gross</div>
                     </div>
-
-                    {/* Wage base caps */}
                     {[
                       { label: "Social Security (6.2%)", cap: SS_WAGE_BASE, desc: "Tax stops at cap — take-home increases" },
                       { label: "NJ SDI (0.26%)", cap: NJ_SDI_BASE, desc: "NJ disability insurance deduction stops" },
@@ -1745,68 +1831,6 @@ function PunchCard() {
                   </div>
                 )}
               </div>
-
-              {/* ── Net Pay Estimate ── */}
-              {totalPay > 0 && (() => {
-                const pc = calcPaycheck(totalPay, settings.filingStatus || "single", settings.preTaxPerPeriod || 0);
-                const projPc = projectedPay ? calcPaycheck(projectedPay, settings.filingStatus || "single", settings.preTaxPerPeriod || 0) : null;
-                const row = (label, amount, color = "#a09060", bold = false) => (
-                  <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid #2a2510", fontSize: bold ? 17 : 14 }}>
-                    <span style={{ color: "#b09060", letterSpacing: 1 }}>{label}</span>
-                    <span style={{ color, fontWeight: bold ? 700 : 400 }}>{typeof amount === "number" ? $p(fmtPay(amount, 1)) : amount}</span>
-                  </div>
-                );
-                return (
-                  <div style={{ marginBottom: 20 }}>
-                    <button
-                      onClick={() => setShowPaystub(p => !p)}
-                      style={{ width: "100%", background: "#221e10", border: "1px solid #3a3218", color: "#d4b84a", fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: 3, textTransform: "uppercase", padding: "11px 16px", cursor: "pointer", textAlign: "left", display: "flex", justifyContent: "space-between" }}
-                    >
-                      <span>💵 Est. Paycheck After Deductions</span>
-                      <span>{showPaystub ? "▲" : "▼"}</span>
-                    </button>
-                    {showPaystub && (
-                      <div style={{ background: "#0e0c07", border: "1px solid #3a3218", borderTop: "none", padding: "0 16px 4px" }}>
-                        <div style={{ fontSize: 13, letterSpacing: 2, color: "#8a7840", textTransform: "uppercase", padding: "12px 0 4px" }}>
-                          {(settings.filingStatus === "married" ? "MFJ" : "Single")} · NJ · 2025 estimates · {isCurrentPeriod ? `${workdaysSoFar} workdays logged` : "full period"}
-                        </div>
-
-                        {row("Gross Pay", pc.gross, "#f0ead8", false)}
-                        {pc.preTax > 0 && row("Pre-Tax Deductions", -pc.preTax, "#e07070")}
-                        {row("Federal Withholding", -pc.federal, "#e07070")}
-                        {row("Social Security (6.2%)", -pc.ss, "#e07070")}
-                        {row("Medicare (1.45%)", -pc.medicare, "#e07070")}
-
-                        <div style={{ fontSize: 13, letterSpacing: 2, color: "#8a7840", textTransform: "uppercase", padding: "10px 0 4px" }}>NJ State</div>
-                        {row("NJ Income Tax", -pc.njState, "#e07070")}
-                        {row("NJ SDI (0.26%)", -pc.njSDI, "#c06050")}
-                        {row("NJ FLI (0.09%)", -pc.njFLI, "#c06050")}
-                        {row("NJ SUI/WF (0.425%)", -pc.njSUI, "#c06050")}
-
-                        <div style={{ borderTop: "2px solid #3a3218", marginTop: 4, padding: "12px 0" }}>
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                            <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 13, letterSpacing: 3, color: "#5dba8a", textTransform: "uppercase" }}>Est. Net Pay</span>
-                            <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 28, color: "#5dba8a", fontWeight: 700 }}>{$p(fmtPay(Math.max(0, pc.netPay), 1))}</span>
-                          </div>
-                          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 14, color: "#8a7840" }}>
-                            <span>Effective tax rate</span>
-                            <span>{pc.gross > 0 ? ((pc.totalDeductions - pc.preTax) / pc.gross * 100).toFixed(1) : 0}%</span>
-                          </div>
-                          {projPc && projPc.gross > pc.gross && (
-                            <div style={{ marginTop: 10, padding: "8px 10px", background: "#221e10", border: "1px solid #3a3218", fontSize: 14, color: "#b09060", display: "flex", justifyContent: "space-between" }}>
-                              <span>Projected net (full period)</span>
-                              <span style={{ color: "#a09060" }}>~{$p(fmtPay(Math.max(0, projPc.netPay), 1))}</span>
-                            </div>
-                          )}
-                        </div>
-                        <div style={{ fontSize: 9, color: "#7a6838", paddingBottom: 10, lineHeight: 1.6 }}>
-                          * Estimates only. Based on annualized gross × 26. Does not account for YTD wage base limits, additional W-4 adjustments, or employer benefits. Consult your paystub or HR for exact figures.
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
 
               {/* Day-by-day */}
               <div style={{ fontSize: 13, letterSpacing: 3, color: "#8a7840", textTransform: "uppercase", marginBottom: 8 }}>Daily Breakdown</div>
