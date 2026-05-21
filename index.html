@@ -805,18 +805,7 @@ function PunchCard() {
   const otStatus      = weekTotalHrs >= 40 ? "over" : weekTotalHrs >= 35 ? "warn" : "ok";
 
   // ── Today (weekly OT model) ──────────────────────────────────
-  const todayShifts    = shifts.filter(s => sameDay(s.clockIn, now));
-  const preTodayShifts = weekShifts.filter(s => !sameDay(s.clockIn, now));
-  const preTodayRegHrs = preTodayShifts.reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
-  const todayCompleted = todayShifts.filter(s => s.clockOut);
-  let _cumHrs = preTodayRegHrs, todayRegHrs = 0, todayOTHrs = 0;
-  for (const s of [...todayCompleted].sort((a, b) => a.clockIn - b.clockIn)) {
-    const hrs = shiftNetHrs(s, lunchMs);
-    const reg = Math.min(hrs, Math.max(0, 40 - _cumHrs));
-    todayRegHrs += reg; todayOTHrs += hrs - reg; _cumHrs += hrs;
-  }
-  const todayRegPay = fmtPay(todayRegHrs, settings.regularRate);
-  const todayOCPay  = fmtPay(todayOTHrs,  settings.regularRate * 1.5);
+  const todayShifts = shifts.filter(s => sameDay(s.clockIn, now));
 
   // ── YTD ─────────────────────────────────────────────────────
   const ytd = getYTD(shifts, settings);
@@ -1206,13 +1195,20 @@ function PunchCard() {
                       <button className="action-btn" onClick={() => setEditingActiveClockIn(false)}>✕</button>
                     </div>
                   ) : (
-                    <div style={{ fontSize: 14, letterSpacing: 2, color: "#b09060", textTransform: "uppercase", marginBottom: 4, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
-                      <span>Clocked in {fmtTime(active.clockIn)} · {fmtHrs(activeElapsed)} elapsed</span>
-                      <button className="action-btn" style={{ padding: "5px 14px", fontSize: 13, letterSpacing: 1 }} title="Edit clock-in time" onClick={() => { const d = new Date(active.clockIn); const local = new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0,16); setActiveClockInInput(local); setEditingActiveClockIn(true); }}>Edit</button>
+                    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 4 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 22, fontWeight: 400, letterSpacing: 2, color: "#b09060" }}>
+                          {fmtTime(active.clockIn)}
+                        </div>
+                        <button className="action-btn" style={{ padding: "3px 10px", fontSize: 12, letterSpacing: 1 }} title="Edit clock-in time" onClick={() => { const d = new Date(active.clockIn); const local = new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0,16); setActiveClockInInput(local); setEditingActiveClockIn(true); }}>Edit</button>
+                      </div>
+                      <div style={{ fontSize: 12, color: "#5a5030", letterSpacing: 2, textTransform: "uppercase" }}>
+                        {fmtHrs(activeElapsed)} elapsed
+                      </div>
                     </div>
                   )}
-                  <div style={{ fontSize: 13, color: activeType === "regular" ? "#5dba8a" : "#e07070", letterSpacing: 2, textTransform: "uppercase" }}>
-                    {activeType === "regular" ? "Regular Shift" : "Overtime Shift"}
+                  <div style={{ fontSize: 12, color: activeType === "regular" ? "#5dba8a" : "#e07070", letterSpacing: 3, textTransform: "uppercase", marginTop: 2 }}>
+                    {activeType === "regular" ? "Regular" : "Overtime"}
                   </div>
                 </div>
               )}
@@ -1317,28 +1313,6 @@ function PunchCard() {
                 </div>
               </div>
             )}
-
-            {/* Today stats */}
-            <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
-              <div className="stat-box">
-                <div className="stat-num" style={{ color: "#5dba8a" }}>{fmtHrs(todayRegHrs * 3600000)}</div>
-                <div className="stat-lbl">Regular hrs</div>
-              </div>
-              <div className="stat-box">
-                <div className="stat-num" style={{ color: "#e07070" }}>{fmtHrs(todayOTHrs * 3600000)}</div>
-                <div className="stat-lbl">Overtime hrs</div>
-              </div>
-            </div>
-            <div style={{ display: "flex", gap: 10, marginBottom: 28 }}>
-              <div className="stat-box">
-                <div className="stat-num" style={{ color: "#d4b84a" }}>{$p(todayRegPay)}</div>
-                <div className="stat-lbl">Regular est.</div>
-              </div>
-              <div className="stat-box">
-                <div className="stat-num" style={{ color: "#d4b84a" }}>{$p(todayOCPay)}</div>
-                <div className="stat-lbl">Overtime est.</div>
-              </div>
-            </div>
 
             {/* Weekly overtime tracker */}
             <div style={{ background: "#221e10", border: "1px solid #3a3218", padding: "12px 14px", marginBottom: 20 }}>
