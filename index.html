@@ -1184,7 +1184,7 @@ function PunchCard() {
 
 
             {/* Punch button */}
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", margin: "28px 0" }}>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", margin: "6px 0 28px" }}>
               {active && (
                 <div style={{ marginBottom: 16, textAlign: "center" }}>
                   {editingActiveClockIn ? (
@@ -1297,40 +1297,22 @@ function PunchCard() {
                 <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 38, fontWeight: 600, letterSpacing: 1, color: tickIsOT ? "#e07070" : "#d4b84a", lineHeight: 1 }}>
                   {$p(`$${tickEarned.toFixed(2)}`)}
                 </div>
-                <div style={{ fontSize: 12, color: tickIsOT ? "#7a3030" : "#4a6838", letterSpacing: 1, marginTop: 5 }}>
+                <div style={{ fontSize: 13, color: tickIsOT ? "#c05050" : "#6a9868", letterSpacing: 1, marginTop: 6 }}>
                   {fmtHrs(activeNetMs)} this shift · {tickIsOT ? `$${otRate.toFixed(2)}` : $p(`$${settings.regularRate.toFixed(2)}`)}/hr
                 </div>
                 <div style={{ marginTop: 10 }}>
                   <div className="ot-bar-wrap">
                     <div className="ot-bar" style={{ width: `${tickWeeklyPct}%`, background: tickIsOT ? "#e07070" : "#5dba8a" }} />
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 3 }}>
-                    <span style={{ fontSize: 10, color: "#3a3218", letterSpacing: 1 }}>{fmtHrs(weekHrsBase * 3600000)} this week</span>
-                    <span style={{ fontSize: 10, color: tickIsOT ? "#7a3030" : "#3a5a30", letterSpacing: 1 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5 }}>
+                    <span style={{ fontSize: 12, color: "#6a5f38", letterSpacing: 1 }}>{fmtHrs(weekHrsBase * 3600000)} this week</span>
+                    <span style={{ fontSize: 12, color: tickIsOT ? "#c05050" : "#5a8058", letterSpacing: 1 }}>
                       {tickIsOT ? `${fmtHrs(tickOtHrs * 3600000)} over 40h` : `OT after ${fmtHrs((40 - weekHrsBase) * 3600000)} more`}
                     </span>
                   </div>
                 </div>
               </div>
             )}
-
-            {/* Weekly overtime tracker */}
-            <div style={{ background: "#221e10", border: "1px solid #3a3218", padding: "12px 14px", marginBottom: 20 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 14, letterSpacing: 1, marginBottom: 4 }}>
-                <span style={{ color: "#b09060", textTransform: "uppercase", letterSpacing: 2 }}>Week Hours</span>
-                <span style={{ color: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a", fontFamily: "'Oswald', sans-serif", fontSize: 14 }}>
-                  {fmtHrs(weekTotalHrs * 3600000)} / 40h
-                  {otStatus === "over" && <span style={{ marginLeft: 6, fontSize: 14 }}>OT</span>}
-                </span>
-              </div>
-              <div className="ot-bar-wrap">
-                <div className="ot-bar" style={{
-                  width: `${Math.min(100, (weekTotalHrs / 40) * 100)}%`,
-                  background: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a",
-                }} />
-              </div>
-              {otStatus === "warn" && <div style={{ fontSize: 13, color: "#a08030", marginTop: 4, letterSpacing: 1 }}>{fmtHrs((40 - weekTotalHrs) * 3600000)} until overtime threshold</div>}
-            </div>
 
             {/* Today's shifts */}
             {todayShifts.length > 0 && (
@@ -1343,7 +1325,7 @@ function PunchCard() {
                       <div style={{ fontSize: 13 }}>{fmtTime(shift.clockIn)} → {fmtTime(shift.clockOut)}</div>
                       {shift.note && <div style={{ fontSize: 14, color: "#b09060", marginTop: 2 }}>{shift.note}</div>}
                     </div>
-                    <div style={{ fontSize: 13, color: "#d4b84a", marginRight: 8 }}>{fmtHrs(shiftNetMs(shift))}</div>
+                    <div style={{ fontSize: 13, color: "#d4b84a", marginRight: 8 }}>{fmtHrs(shiftNetMs(shift, lunchMs))}</div>
                     <button className="action-btn" style={{ marginRight: 4 }} onClick={() => setEditShift({ ...shift })} style={{ marginRight: 4, padding: "5px 14px", fontSize: 13, letterSpacing: 1 }}>Edit</button>
                     <button className="action-btn danger" onClick={() => deleteShift(shift.id)}>×</button>
                   </div>
