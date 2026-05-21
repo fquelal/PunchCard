@@ -47,7 +47,7 @@
     const { useState, useEffect, useRef } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.2.2";
+const APP_VERSION = "1.2.3";
 
 // ── Tab order
 const TABS = ["today", "week", "period", "log"];
@@ -1811,7 +1811,7 @@ function PunchCard() {
 
           const wShifts = shifts.filter(s =>
             weekStart(new Date(s.clockIn)).getTime() === viewingWeekMs
-          ).sort((a, b) => b.clockIn - a.clockIn);
+          ).sort((a, b) => a.clockIn - b.clockIn);
 
           const wPay  = calcWeekPay(wShifts.filter(s => s.clockOut), settings, lunchMs);
           const wHrs  = wShifts.filter(s => s.clockOut).reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
