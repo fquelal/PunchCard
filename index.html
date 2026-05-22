@@ -275,7 +275,7 @@
     const { useState, useEffect, useRef, useMemo } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.2.3";
+const APP_VERSION = "1.3.0";
 
 // ── Tab order
 const TABS = ["today", "week", "period", "log"];
@@ -612,6 +612,50 @@ function weeksInRange(startMs, endMs) {
   return starts;
 }
 
+// ── NJ Holiday Engine ────────────────────────────────────────
+function getNJHolidays(year) {
+  // nth weekday of a month (1=Mon … 7=Sun)
+  function nthWD(yr, mo, wd, n) {
+    const d = new Date(yr, mo, 1);
+    let count = 0;
+    while (true) {
+      if (d.getDay() === wd) { count++; if (count === n) return new Date(d); }
+      d.setDate(d.getDate() + 1);
+    }
+  }
+  // last weekday of a month
+  function lastWD(yr, mo, wd) {
+    const d = new Date(yr, mo + 1, 0);
+    while (d.getDay() !== wd) d.setDate(d.getDate() - 1);
+    return new Date(d);
+  }
+  // observed date: Sat → prior Fri, Sun → next Mon
+  function obs(d) {
+    const w = d.getDay();
+    if (w === 6) return new Date(d.getFullYear(), d.getMonth(), d.getDate() - 1);
+    if (w === 0) return new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1);
+    return new Date(d);
+  }
+  return [
+    { name: "New Year's Day",    date: obs(new Date(year, 0, 1)) },
+    { name: "Memorial Day",      date: lastWD(year, 4, 1) },
+    { name: "Independence Day",  date: obs(new Date(year, 6, 4)) },
+    { name: "Labor Day",         date: nthWD(year, 8, 1, 1) },
+    { name: "Thanksgiving Day",  date: nthWD(year, 10, 4, 4) },
+    { name: "Christmas Day",     date: obs(new Date(year, 11, 25)) },
+  ].sort((a, b) => a.date - b.date);
+}
+
+function getNJHolidayName(ts) {
+  const d = new Date(ts);
+  const h = getNJHolidays(d.getFullYear()).find(h => sameDay(h.date, d));
+  return h ? h.name : null;
+}
+
+function isNJHoliday(ts) {
+  return getNJHolidayName(ts) !== null;
+}
+
 // ── Default state ────────────────────────────────────────────
 // Default anchor: most recent Monday that aligns to a biweekly cycle from 2025-01-06
 const defaultAnchor = "2025-01-06";
@@ -641,6 +685,9 @@ function PunchCard() {
   const [showPaystub, setShowPaystub]   = useState(false);
   const [privacyMode, setPrivacyMode]   = useState(false);
   const [showAbout, setShowAbout]       = useState(false);
+  const [showHolidays, setShowHolidays] = useState(false);
+  const [holidayYear, setHolidayYear]   = useState(new Date().getFullYear());
+  const [hideEarned, setHideEarned]     = useState(false);
   const [dismissedWarnings, setDismissedWarnings] = useState({});
   const [viewingPeriodOffset, setViewingPeriodOffset] = useState(0);
   const [logWeekOffset, setLogWeekOffset]             = useState(0);
@@ -648,6 +695,7 @@ function PunchCard() {
   const [activeClockInInput, setActiveClockInInput]     = useState("");
   const [showManualEntry, setShowManualEntry] = useState(false);
   const [manualEntry, setManualEntry] = useState({ date: "", clockIn: "", clockOut: "", type: "regular", note: "" });
+  const [manualEntryError, setManualEntryError] = useState(null);
   const loaded = useRef(false);
   const importFileRef = useRef(null);
   const [importStatus, setImportStatus] = useState(null);
@@ -784,7 +832,7 @@ function PunchCard() {
     
     
     if (!active) {
-      const newActive = { id: crypto.randomUUID(), type: "regular", clockIn: ts, onLunch: false, lunchStart: null, lunchDuration: 0 };
+      const newActive = { id: crypto.randomUUID(), type: (isNJHoliday(ts) || new Date(ts).getDay() === 0 || new Date(ts).getDay() === 6) ? "oncall" : "regular", clockIn: ts, onLunch: false, lunchStart: null, lunchDuration: 0 };
       setActive(newActive);
       setFlash("in");
       setTimeout(() => setFlash(null), 800);
@@ -832,15 +880,28 @@ function PunchCard() {
 
   function saveManualEntry() {
     const { date, clockIn, clockOut, type, note } = manualEntry;
-    if (!date || !clockIn || !clockOut) return;
-    const inTs  = new Date(`${date}T${clockIn}`).getTime();
-    const outTs = new Date(`${date}T${clockOut}`).getTime();
-    if (isNaN(inTs) || isNaN(outTs) || outTs <= inTs) return;
-    const shift = { id: crypto.randomUUID(), type, clockIn: inTs, clockOut: outTs,
+    if (!date || !clockIn || !clockOut) {
+      setManualEntryError("Please fill in date, clock-in, and clock-out.");
+      return;
+    }
+    // Append :00 for browsers that need full HH:MM:SS
+    const inTs  = new Date(`${date}T${clockIn}:00`).getTime();
+    let   outTs = new Date(`${date}T${clockOut}:00`).getTime();
+    if (isNaN(inTs) || isNaN(outTs)) {
+      setManualEntryError("Invalid date or time — please re-enter.");
+      return;
+    }
+    // Handle overnight shifts: if out is before in, assume next calendar day
+    if (outTs <= inTs) outTs += 24 * 3600000;
+    // Auto-detect holiday OT for the chosen date
+    const autoType = (isNJHoliday(inTs) || new Date(inTs).getDay() === 0 || new Date(inTs).getDay() === 6)
+      ? "oncall" : type;
+    const shift = { id: crypto.randomUUID(), type: autoType, clockIn: inTs, clockOut: outTs,
                     lunchDuration: 0, onLunch: false, lunchStart: null, note: note.trim() };
     const updated = [shift, ...shifts].sort((a, b) => b.clockIn - a.clockIn);
     setShifts(updated);
     setShowManualEntry(false);
+    setManualEntryError(null);
     setManualEntry({ date: "", clockIn: "", clockOut: "", type: "regular", note: "" });
     persist(updated, active, settings);
   }
@@ -1055,6 +1116,11 @@ function PunchCard() {
   if (weekTotalHrs > 40) {
     warnings.push({ id: `ot-${ws.toDateString()}`, msg: `${fmtHrs((weekTotalHrs - 40) * 3600000)} over 40h this week · OT rate active`, color: "#e07070", bg: "#1e0e0e", border: "#6a2020" });
   }
+  // Holiday warning
+  const todayHolidayName = getNJHolidayName(now.getTime());
+  if (todayHolidayName && !dismissedWarnings[`holiday-${now.toDateString()}`]) {
+    warnings.push({ id: `holiday-${now.toDateString()}`, msg: `${todayHolidayName} — OT rate auto-applied when clocking in`, color: "#d4b84a", bg: "#1a1400", border: "#8a7020" });
+  }
   const activeWarnings = warnings.filter(w => !dismissedWarnings[w.id]);
 
   const h = now.getHours(), m = now.getMinutes(), s = now.getSeconds();
@@ -1076,6 +1142,7 @@ function PunchCard() {
   const tickEarned      = tickRegHrs * settings.regularRate + tickOtHrs * otRate;
   const tickIsOT        = tickOtHrs > 0;
   const tickWeeklyPct   = Math.min(100, ((weekHrsBase + tickRegHrs) / 40) * 100);
+  const totalWeekHrs    = weekHrsBase + activeNetHrs; // live total including active shift
 
   // ── Privacy helpers ──────────────────────────────────────────
   const PRIV = '——';
@@ -1173,13 +1240,13 @@ function PunchCard() {
 
             {/* Live clock */}
             <div style={{ textAlign: "center", marginBottom: 8 }}>
+              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: 5, color: "#b09060", textTransform: "uppercase", marginBottom: 6 }}>
+                {now.toLocaleDateString("en-US", { weekday: "long" })}
+              </div>
               <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 42, fontWeight: 400, letterSpacing: 3, color: "#f0ead8", lineHeight: 1 }}>
                 {timeStr}
               </div>
               {/* Day context — weekend always OT, weekdays show toggle selection */}
-              <div style={{ fontSize: 13, letterSpacing: 3, color: "#7a7060", marginTop: 6, textTransform: "uppercase" }}>
-                {[0,6].includes(now.getDay()) ? "◆ Weekend" : "▲ Weekday"}
-              </div>
             </div>
 
             {/* Overtime warning */}
@@ -1203,9 +1270,6 @@ function PunchCard() {
                           {fmtTime(active.clockIn)}
                         </div>
                         <button className="action-btn" style={{ padding: "3px 10px", fontSize: 12, letterSpacing: 1 }} title="Edit clock-in time" onClick={() => { const d = new Date(active.clockIn); const local = new Date(d - d.getTimezoneOffset() * 60000).toISOString().slice(0,16); setActiveClockInInput(local); setEditingActiveClockIn(true); }}>Edit</button>
-                      </div>
-                      <div style={{ fontSize: 12, color: "#5a5030", letterSpacing: 2, textTransform: "uppercase" }}>
-                        {fmtHrs(activeElapsed)} elapsed
                       </div>
                     </div>
                   )}
@@ -1238,23 +1302,30 @@ function PunchCard() {
               {active && active.type === "regular" && (
                 <div style={{ marginTop: 18, width: "100%", maxWidth: 280 }}>
                   {!active.onLunch ? (
-                    <button
-                      onClick={handleLunchStart}
-                      style={{
-                        width: "100%", padding: "11px 0",
-                        background: "#1a1810",
-                        border: "1px solid #3a3218",
-                        color: "#7a6838",
-                        fontFamily: "'Oswald', sans-serif",
-                        fontSize: 13, letterSpacing: 3,
-                        textTransform: "uppercase", cursor: "pointer",
-                        transition: "all 0.15s",
-                      }}
-                      onMouseEnter={e => { e.currentTarget.style.borderColor="#6a5a28"; e.currentTarget.style.color="#b09060"; }}
-                      onMouseLeave={e => { e.currentTarget.style.borderColor="#3a3218"; e.currentTarget.style.color="#7a6838"; }}
-                    >
-                      Start Lunch
-                    </button>
+                    <>
+                      <button
+                        onClick={handleLunchStart}
+                        style={{
+                          width: "100%", padding: "11px 0",
+                          background: "#1a1810",
+                          border: "1px solid #3a3218",
+                          color: "#7a6838",
+                          fontFamily: "'Oswald', sans-serif",
+                          fontSize: 13, letterSpacing: 3,
+                          textTransform: "uppercase", cursor: "pointer",
+                          transition: "all 0.15s",
+                        }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor="#6a5a28"; e.currentTarget.style.color="#b09060"; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor="#3a3218"; e.currentTarget.style.color="#7a6838"; }}
+                      >
+                        Start Lunch
+                      </button>
+                      <div style={{ fontSize: 11, color: "#4a4020", letterSpacing: 1, marginTop: 6, textAlign: "center" }}>
+                        {settings.autoLunch !== false
+                          ? `Auto-deduct ${settings.lunchMinutes || 30}m on clock-out`
+                          : "No auto deduction"}
+                      </div>
+                    </>
                   ) : (
                     <div style={{ background: "#1a1508", border: "1px solid #4a4010", padding: "12px 16px" }}>
                       <div style={{ fontSize: 12, letterSpacing: 3, color: "#8a7840", textTransform: "uppercase", marginBottom: 6 }}>On Lunch</div>
@@ -1285,36 +1356,47 @@ function PunchCard() {
               )}
             </div>
 
-            {/* Live earnings ticker — only while clocked in */}
+            {/* Earned this shift — dollar only, own hide button */}
             {active && (
-              <div style={{
-                background: "#221e10",
-                border: `1px solid ${tickIsOT ? "#5c1a1a" : "#1a3d2a"}`,
-                padding: "14px 16px", marginBottom: 16,
-              }}>
-                <div style={{ fontSize: 11, letterSpacing: 3, color: tickIsOT ? "#e07070" : "#5dba8a", textTransform: "uppercase", marginBottom: 8 }}>
-                  <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: tickIsOT ? "#e07070" : "#5dba8a", marginRight: 6, verticalAlign: "middle", animation: "pulse 1s infinite" }} />
-                  Earned this shift
-                </div>
-                <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 38, fontWeight: 600, letterSpacing: 1, color: tickIsOT ? "#e07070" : "#d4b84a", lineHeight: 1 }}>
-                  {$p(`$${tickEarned.toFixed(2)}`)}
-                </div>
-                <div style={{ fontSize: 13, color: tickIsOT ? "#c05050" : "#6a9868", letterSpacing: 1, marginTop: 6 }}>
-                  {fmtHrs(activeNetMs)} this shift · {tickIsOT ? `$${otRate.toFixed(2)}` : $p(`$${settings.regularRate.toFixed(2)}`)}/hr
-                </div>
-                <div style={{ marginTop: 10 }}>
-                  <div className="ot-bar-wrap">
-                    <div className="ot-bar" style={{ width: `${tickWeeklyPct}%`, background: tickIsOT ? "#e07070" : "#5dba8a" }} />
+              <div style={{ background: "#221e10", border: `1px solid ${tickIsOT ? "#5c1a1a" : "#1a3d2a"}`, padding: "14px 16px", marginBottom: 10 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, letterSpacing: 3, color: tickIsOT ? "#e07070" : "#5dba8a", textTransform: "uppercase" }}>
+                    <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: tickIsOT ? "#e07070" : "#5dba8a", marginRight: 6, verticalAlign: "middle", animation: "pulse 1s infinite" }} />
+                    Earned this shift
                   </div>
-                  <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5 }}>
-                    <span style={{ fontSize: 12, color: "#6a5f38", letterSpacing: 1 }}>{fmtHrs(weekHrsBase * 3600000)} this week</span>
-                    <span style={{ fontSize: 12, color: tickIsOT ? "#c05050" : "#5a8058", letterSpacing: 1 }}>
-                      {tickIsOT ? `${fmtHrs(tickOtHrs * 3600000)} over 40h` : `OT after ${fmtHrs((40 - weekHrsBase) * 3600000)} more`}
-                    </span>
-                  </div>
+                  <button
+                    onClick={() => setHideEarned(p => !p)}
+                    style={{ WebkitAppearance: "none", appearance: "none", background: hideEarned ? "#3a2a08" : "transparent", border: `1px solid ${hideEarned ? "#d4b84a" : "#3a3218"}`, color: hideEarned ? "#d4b84a" : "#5a5030", fontFamily: "'Courier Prime', monospace", fontSize: 10, letterSpacing: 2, padding: "3px 8px", cursor: "pointer", textTransform: "uppercase" }}>
+                    {hideEarned ? "show" : "hide"}
+                  </button>
+                </div>
+                <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 40, fontWeight: 600, letterSpacing: 1, color: tickIsOT ? "#e07070" : "#d4b84a", lineHeight: 1 }}>
+                  {hideEarned || privacyMode ? "——" : `$${tickEarned.toFixed(2)}`}
                 </div>
               </div>
             )}
+
+            {/* Hours — compact side-by-side stat boxes */}
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              {active && (
+                <div className="stat-box" style={{ flex: 1, padding: "10px 12px" }}>
+                  <div className="stat-num" style={{ color: "#f0ead8", fontSize: 22 }}>{fmtHrs(activeNetMs)}</div>
+                  <div className="stat-lbl">This shift</div>
+                </div>
+              )}
+              <div className="stat-box" style={{ flex: 1, padding: "10px 12px" }}>
+                <div className="stat-num" style={{ color: "#f0ead8", fontSize: 22 }}>{fmtHrs(totalWeekHrs * 3600000)}</div>
+                <div className="stat-lbl">This week</div>
+              </div>
+              <div className="stat-box" style={{ flex: 1, padding: "10px 12px" }}>
+                <div className="stat-num" style={{ color: totalWeekHrs >= 40 ? "#e07070" : "#5dba8a", fontSize: 22 }}>
+                  {totalWeekHrs >= 40 ? fmtHrs((totalWeekHrs - 40) * 3600000) : fmtHrs((40 - totalWeekHrs) * 3600000)}
+                </div>
+                <div className="stat-lbl" style={{ color: totalWeekHrs >= 40 ? "#8a4040" : "#4a6040" }}>
+                  {totalWeekHrs >= 40 ? "Into OT" : "Until OT"}
+                </div>
+              </div>
+            </div>
 
             {/* Today's shifts */}
             {todayShifts.length > 0 && (
@@ -1328,7 +1410,7 @@ function PunchCard() {
                       {shift.note && <div style={{ fontSize: 14, color: "#b09060", marginTop: 2 }}>{shift.note}</div>}
                     </div>
                     <div style={{ fontSize: 13, color: "#d4b84a", marginRight: 8 }}>{fmtHrs(shiftNetMs(shift, lunchMs))}</div>
-                    <button className="action-btn" style={{ marginRight: 4 }} onClick={() => setEditShift({ ...shift })} style={{ marginRight: 4, padding: "5px 14px", fontSize: 13, letterSpacing: 1 }}>Edit</button>
+                    <button className="action-btn" style={{ padding: "5px 14px", fontSize: 13, letterSpacing: 1 }} onClick={() => setEditShift({ ...shift })}>Edit</button>
                     <button className="action-btn danger" onClick={() => deleteShift(shift.id)}>×</button>
                   </div>
                 ))}
@@ -1342,49 +1424,68 @@ function PunchCard() {
                   onClick={() => {
                     const today = new Date().toISOString().slice(0,10);
                     setManualEntry(p => ({ ...p, date: today }));
+                    setManualEntryError(null);
                     setShowManualEntry(true);
                   }}>
                   ＋ Add Manual Entry
                 </button>
               ) : (
-                <div className="manual-entry-panel">
-                  <div style={{ fontSize: 13, color: "#d4b84a", letterSpacing: 2, textTransform: "uppercase", marginBottom: 14 }}>Manual Entry</div>
-                  <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+                <div style={{ background: "#0e0c07", border: "1px solid #2a2510", borderRadius: 2, padding: "18px 16px", marginBottom: 16 }}>
+                  <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 14, color: "#d4b84a", letterSpacing: 3, textTransform: "uppercase", marginBottom: 18 }}>Manual Entry</div>
+
+                  {/* Date */}
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 11, color: "#b09060", letterSpacing: 2, textTransform: "uppercase", marginBottom: 6 }}>Date</div>
+                    <input type="date" className="settings-input" value={manualEntry.date}
+                      onChange={e => { setManualEntry(p => ({ ...p, date: e.target.value })); setManualEntryError(null); }} />
+                    {manualEntry.date && (isNJHoliday(new Date(manualEntry.date + "T12:00:00").getTime()) || [0,6].includes(new Date(manualEntry.date + "T12:00:00").getDay())) && (
+                      <div style={{ fontSize: 11, color: "#d4b84a", letterSpacing: 1, marginTop: 5 }}>
+                        ★ {getNJHolidayName(new Date(manualEntry.date + "T12:00:00").getTime()) || "Weekend"} — OT rate will be applied
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Clock In / Out */}
+                  <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
                     <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 1, marginBottom: 5 }}>DATE</div>
-                      <input type="date" className="time-input" value={manualEntry.date}
-                        onChange={e => setManualEntry(p => ({ ...p, date: e.target.value }))} />
+                      <div style={{ fontSize: 11, color: "#b09060", letterSpacing: 2, textTransform: "uppercase", marginBottom: 6 }}>Clock In</div>
+                      <input type="time" className="settings-input" value={manualEntry.clockIn}
+                        onChange={e => { setManualEntry(p => ({ ...p, clockIn: e.target.value })); setManualEntryError(null); }} />
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 11, color: "#b09060", letterSpacing: 2, textTransform: "uppercase", marginBottom: 6 }}>Clock Out</div>
+                      <input type="time" className="settings-input" value={manualEntry.clockOut}
+                        onChange={e => { setManualEntry(p => ({ ...p, clockOut: e.target.value })); setManualEntryError(null); }} />
                     </div>
                   </div>
-                  <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 1, marginBottom: 5 }}>CLOCK IN</div>
-                      <input type="time" className="time-input" value={manualEntry.clockIn}
-                        onChange={e => setManualEntry(p => ({ ...p, clockIn: e.target.value }))} />
-                    </div>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 1, marginBottom: 5 }}>CLOCK OUT</div>
-                      <input type="time" className="time-input" value={manualEntry.clockOut}
-                        onChange={e => setManualEntry(p => ({ ...p, clockOut: e.target.value }))} />
-                    </div>
-                  </div>
-                  <div style={{ marginBottom: 10 }}>
-                    <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 1, marginBottom: 5 }}>TYPE</div>
-                    <div className="type-toggle">
+
+                  {/* Type */}
+                  <div style={{ marginBottom: 14 }}>
+                    <div style={{ fontSize: 11, color: "#b09060", letterSpacing: 2, textTransform: "uppercase", marginBottom: 6 }}>Type</div>
+                    <div style={{ display: "flex" }}>
                       <button className={`type-btn${manualEntry.type === "regular" ? " active-reg" : ""}`}
                         onClick={() => setManualEntry(p => ({ ...p, type: "regular" }))}>Regular</button>
                       <button className={`type-btn${manualEntry.type === "oncall" ? " active-oc" : ""}`}
                         onClick={() => setManualEntry(p => ({ ...p, type: "oncall" }))}>Overtime</button>
                     </div>
                   </div>
-                  <div style={{ marginBottom: 14 }}>
-                    <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 1, marginBottom: 5 }}>NOTE (OPTIONAL)</div>
-                    <input className="time-input" placeholder="e.g. Emergency call, missed punch…"
+
+                  {/* Note */}
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 11, color: "#b09060", letterSpacing: 2, textTransform: "uppercase", marginBottom: 6 }}>Note (Optional)</div>
+                    <input className="settings-input" placeholder="e.g. Emergency call, missed punch…"
                       value={manualEntry.note} onChange={e => setManualEntry(p => ({ ...p, note: e.target.value }))} />
                   </div>
+
+                  {/* Error */}
+                  {manualEntryError && (
+                    <div style={{ fontSize: 12, color: "#e07070", letterSpacing: 1, marginBottom: 12 }}>✗ {manualEntryError}</div>
+                  )}
+
+                  {/* Actions */}
                   <div style={{ display: "flex", gap: 8 }}>
-                    <button className="save-btn" style={{ fontSize: 13, padding: "9px 20px" }} onClick={saveManualEntry}>Save Entry</button>
-                    <button className="action-btn" onClick={() => setShowManualEntry(false)}>Cancel</button>
+                    <button className="save-btn" style={{ flex: 1 }} onClick={saveManualEntry}>Save Entry</button>
+                    <button className="action-btn" style={{ padding: "11px 20px" }} onClick={() => { setShowManualEntry(false); setManualEntryError(null); }}>Cancel</button>
                   </div>
                 </div>
               )}
@@ -1977,6 +2078,56 @@ function PunchCard() {
             </div>
           </div>
 
+          {/* ── NJ Holidays ── */}
+          <div style={{ borderTop: "1px solid #2a2510", marginTop: 20, paddingTop: 16 }}>
+            <button
+              onClick={() => setShowHolidays(p => !p)}
+              style={{ width: "100%", background: "none", border: "none", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", padding: 0, marginBottom: showHolidays ? 14 : 0 }}
+            >
+              <div style={{ fontSize: 14, letterSpacing: 3, color: "#b09060", textTransform: "uppercase" }}>NJ Holidays</div>
+              <div style={{ fontSize: 14, color: "#4a4020" }}>{showHolidays ? "▲" : "▼"}</div>
+            </button>
+            {showHolidays && (() => {
+              const hdays = getNJHolidays(holidayYear);
+              return (
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+                    <div style={{ fontSize: 13, color: "#b09060", letterSpacing: 2, textTransform: "uppercase" }}>Year</div>
+                    <select
+                      value={holidayYear}
+                      onChange={e => setHolidayYear(Number(e.target.value))}
+                      style={{ background: "#221e10", border: "1px solid #3a3218", color: "#f0ead8", fontFamily: "'Courier Prime', monospace", fontSize: 14, padding: "6px 10px", outline: "none", cursor: "pointer" }}
+                    >
+                      {[2024,2025,2026,2027,2028].map(y => <option key={y} value={y}>{y}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#5a5030", letterSpacing: 1, marginBottom: 10 }}>
+                    Clocking in on these days auto-applies OT rate (NJ law)
+                  </div>
+                  <div style={{ border: "1px solid #2a2510" }}>
+                    <div style={{ display: "flex", padding: "8px 12px", background: "#0e0c07", borderBottom: "1px solid #2a2510" }}>
+                      <div style={{ flex: 1, fontSize: 12, letterSpacing: 2, color: "#b09060", textTransform: "uppercase" }}>Date</div>
+                      <div style={{ flex: 2, fontSize: 12, letterSpacing: 2, color: "#b09060", textTransform: "uppercase" }}>Holiday</div>
+                    </div>
+                    {hdays.map(h => {
+                      const isToday = sameDay(h.date, now);
+                      return (
+                        <div key={h.name} style={{ display: "flex", padding: "10px 12px", borderBottom: "1px solid #2a2510", background: isToday ? "#1a1400" : "transparent" }}>
+                          <div style={{ flex: 1, fontFamily: "'Courier Prime', monospace", fontSize: 14, color: isToday ? "#d4b84a" : "#f0ead8" }}>
+                            {h.date.toLocaleDateString("en-US", { month: "2-digit", day: "2-digit", year: "numeric" })}
+                          </div>
+                          <div style={{ flex: 2, fontFamily: "'Courier Prime', monospace", fontSize: 14, color: isToday ? "#d4b84a" : "#f0ead8" }}>
+                            {h.name}{isToday ? " ★" : ""}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+
           {/* ── About ── */}
           <div style={{ borderTop: "1px solid #2a2510", marginTop: 20, paddingTop: 16 }}>
             <button
@@ -1993,6 +2144,10 @@ function PunchCard() {
               <>
                 {[
                   ["NJ overtime law",    "OT after 40h/week at 1.5× — rate derived from regular rate, not configurable"],
+                  ["NJ holiday OT",      "Clocking in on 6 company holidays auto-sets OT rate — see NJ Holidays list in settings"],
+                  ["Weekend OT",         "Clocking in on Saturday or Sunday also auto-applies OT rate"],
+                  ["Manual entry fix",   "Entries now save reliably; overnight shifts (out before in) handled automatically"],
+                  ["Manual holiday hint","Manual entry shows a ★ badge when the selected date is a holiday or weekend"],
                   ["Weekly 40h cap",     "All hours count equally toward the threshold regardless of when worked"],
                   ["Live ticker",        "Earnings tick up in real time, showing weekly context toward 40h"],
                   ["Weekly OT bar",      "Progress bar shows how far through the 40h weekly threshold you are"],
@@ -2015,7 +2170,7 @@ function PunchCard() {
                   </div>
                 ))}
                 <div style={{ fontSize: 11, color: "#3a3218", letterSpacing: 1, textAlign: "center", paddingTop: 4 }}>
-                  Built for NJ hourly workers · Parsippany
+                  Built for NJ hourly workers
                 </div>
               </>
             )}
