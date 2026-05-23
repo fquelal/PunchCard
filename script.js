@@ -1052,8 +1052,8 @@ function PunchCard() {
                 <div style={{ marginTop: 18, width: "100%", maxWidth: 280 }}>
                   {!active.onLunch ? (
                     <>
-                      {/* Only show Start Lunch button when auto-deduct is OFF */}
-                      {!settings.autoLunch && (
+                      {/* Show Start Lunch button when auto-deduct is OFF; show note when ON */}
+                      {settings.autoLunch === false ? (
                         <button
                           onClick={handleLunchStart}
                           style={{
@@ -1071,8 +1071,7 @@ function PunchCard() {
                         >
                           Start Lunch
                         </button>
-                      )}
-                      {settings.autoLunch && (
+                      ) : (
                         <div style={{ fontSize: 11, color: "#4a4020", letterSpacing: 1, textAlign: "center" }}>
                           Auto-deduct {settings.lunchMinutes || 30}m on clock-out
                         </div>
