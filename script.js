@@ -24,7 +24,7 @@ const manifest = {
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.2.7";
+const APP_VERSION = "1.2.6";
 
 // ── Tab order
 const TABS = ["today", "week", "period", "log"];
@@ -1047,8 +1047,8 @@ function PunchCard() {
                 </div>
               )}
 
-              {/* Lunch — full-width below punch button, regular shifts only */}
-              {active && active.type === "regular" && (
+              {/* Lunch — full-width below punch button */}
+              {active && (
                 <div style={{ marginTop: 18, width: "100%", maxWidth: 280 }}>
                   {!active.onLunch ? (
                     <>
