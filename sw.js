@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────
-//  PunchCard Service Worker  v1.1.9
+//  PunchCard
 //  Deploy this file as sw.js alongside index.html.
 //  To push an update: bump CACHE_VERSION and redeploy.
 // ─────────────────────────────────────────────────────────────
