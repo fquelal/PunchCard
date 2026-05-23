@@ -24,7 +24,7 @@ const manifest = {
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.2.6";
+const APP_VERSION = "1.2.7";
 
 // ── Tab order
 const TABS = ["today", "week", "period", "log"];
