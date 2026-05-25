@@ -24,7 +24,7 @@ const manifest = {
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.2.7";
+const APP_VERSION = "1.2.8";
 
 // ── Tab order
 const TABS = ["today", "week", "period", "log"];
@@ -562,7 +562,50 @@ function PunchCard() {
       } catch {}
       loaded.current = true;
     }
-    load();
+    load().then(() => {
+      // ── Holiday auto-shift ───────────────────────────────────
+      // After loading, if today is a recognised NJ holiday and no shift
+      // (or active punch) already exists for today, insert an 8-hour OT
+      // shift automatically (8:00 AM – 4:00 PM).
+      const todayDate = new Date();
+      const holidayName = getNJHolidayName(todayDate.getTime());
+      if (!holidayName) return;
+
+      // We need the latest shifts state — use the functional-update form
+      setShifts(currentShifts => {
+        const alreadyHasToday = currentShifts.some(s => sameDay(s.clockIn, todayDate));
+        if (alreadyHasToday) return currentShifts; // don't duplicate
+
+        // Build 8:00 AM → 4:00 PM timestamps for today
+        const clockIn  = new Date(todayDate); clockIn.setHours(8, 0, 0, 0);
+        const clockOut = new Date(todayDate); clockOut.setHours(16, 0, 0, 0);
+
+        const holidayShift = {
+          id: crypto.randomUUID(),
+          type: "regular",          // holiday pay at regular rate; OT only if physically clocked in
+          clockIn:  clockIn.getTime(),
+          clockOut: clockOut.getTime(),
+          lunchDuration: 0,
+          onLunch: false,
+          lunchStart: null,
+          note: `${holidayName} — auto holiday`,
+        };
+
+        const updated = [holidayShift, ...currentShifts].sort((a, b) => b.clockIn - a.clockIn);
+
+        // Persist with current settings (read from state via functional update)
+        setSettings(s => {
+          appStorage.set(STORAGE_KEY, JSON.stringify({
+            shifts: updated,
+            active: null,
+            settings: s,
+          })).catch(() => {});
+          return s; // unchanged
+        });
+
+        return updated;
+      });
+    });
   }, []);
 
   // Save
@@ -868,7 +911,7 @@ function PunchCard() {
   // Holiday warning
   const todayHolidayName = getNJHolidayName(now.getTime());
   if (todayHolidayName && !dismissedWarnings[`holiday-${now.toDateString()}`]) {
-    warnings.push({ id: `holiday-${now.toDateString()}`, msg: `${todayHolidayName} — OT rate auto-applied when clocking in`, color: "#d4b84a", bg: "#1a1400", border: "#8a7020" });
+    warnings.push({ id: `holiday-${now.toDateString()}`, msg: `${todayHolidayName} — 8h auto-added at regular rate · clock in to earn OT`, color: "#d4b84a", bg: "#1a1400", border: "#8a7020" });
   }
   const activeWarnings = warnings.filter(w => !dismissedWarnings[w.id]);
 
@@ -1047,35 +1090,33 @@ function PunchCard() {
                 </div>
               )}
 
-              {/* Lunch — full-width below punch button */}
-              {active && (
+              {/* Lunch — full-width below punch button, regular shifts only */}
+              {active && active.type === "regular" && (
                 <div style={{ marginTop: 18, width: "100%", maxWidth: 280 }}>
                   {!active.onLunch ? (
                     <>
-                      {/* Show Start Lunch button when auto-deduct is OFF; show note when ON */}
-                      {settings.autoLunch === false ? (
-                        <button
-                          onClick={handleLunchStart}
-                          style={{
-                            width: "100%", padding: "11px 0",
-                            background: "#1a1810",
-                            border: "1px solid #3a3218",
-                            color: "#7a6838",
-                            fontFamily: "'Oswald', sans-serif",
-                            fontSize: 13, letterSpacing: 3,
-                            textTransform: "uppercase", cursor: "pointer",
-                            transition: "all 0.15s",
-                          }}
-                          onMouseEnter={e => { e.currentTarget.style.borderColor="#6a5a28"; e.currentTarget.style.color="#b09060"; }}
-                          onMouseLeave={e => { e.currentTarget.style.borderColor="#3a3218"; e.currentTarget.style.color="#7a6838"; }}
-                        >
-                          Start Lunch
-                        </button>
-                      ) : (
-                        <div style={{ fontSize: 11, color: "#4a4020", letterSpacing: 1, textAlign: "center" }}>
-                          Auto-deduct {settings.lunchMinutes || 30}m on clock-out
-                        </div>
-                      )}
+                      <button
+                        onClick={handleLunchStart}
+                        style={{
+                          width: "100%", padding: "11px 0",
+                          background: "#1a1810",
+                          border: "1px solid #3a3218",
+                          color: "#7a6838",
+                          fontFamily: "'Oswald', sans-serif",
+                          fontSize: 13, letterSpacing: 3,
+                          textTransform: "uppercase", cursor: "pointer",
+                          transition: "all 0.15s",
+                        }}
+                        onMouseEnter={e => { e.currentTarget.style.borderColor="#6a5a28"; e.currentTarget.style.color="#b09060"; }}
+                        onMouseLeave={e => { e.currentTarget.style.borderColor="#3a3218"; e.currentTarget.style.color="#7a6838"; }}
+                      >
+                        Start Lunch
+                      </button>
+                      <div style={{ fontSize: 11, color: "#4a4020", letterSpacing: 1, marginTop: 6, textAlign: "center" }}>
+                        {settings.autoLunch !== false
+                          ? `Auto-deduct ${settings.lunchMinutes || 30}m on clock-out`
+                          : "No auto deduction"}
+                      </div>
                     </>
                   ) : (
                     <div style={{ background: "#1a1508", border: "1px solid #4a4010", padding: "12px 16px" }}>
@@ -1895,7 +1936,7 @@ function PunchCard() {
               <>
                 {[
                   ["NJ overtime law",    "OT after 40h/week at 1.5× — rate derived from regular rate, not configurable"],
-                  ["NJ holiday OT",      "Clocking in on 6 company holidays auto-sets OT rate — see NJ Holidays list in settings"],
+                  ["NJ holiday OT",      "8-hour shift (8 AM–4 PM) auto-inserted on the 6 company holidays at regular rate — clock in on a holiday to earn OT on top"],
                   ["Weekend OT",         "Clocking in on Saturday or Sunday also auto-applies OT rate"],
                   ["Manual entry fix",   "Entries now save reliably; overnight shifts (out before in) handled automatically"],
                   ["Manual holiday hint","Manual entry shows a ★ badge when the selected date is a holiday or weekend"],
