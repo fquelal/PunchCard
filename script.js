@@ -24,7 +24,7 @@ const manifest = {
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.2.8";
+const APP_VERSION = "1.3.0";
 
 // ── Tab order
 const TABS = ["today", "week", "period", "log"];
@@ -571,39 +571,43 @@ function PunchCard() {
       const holidayName = getNJHolidayName(todayDate.getTime());
       if (!holidayName) return;
 
-      // We need the latest shifts state — use the functional-update form
-      setShifts(currentShifts => {
-        const alreadyHasToday = currentShifts.some(s => sameDay(s.clockIn, todayDate));
-        if (alreadyHasToday) return currentShifts; // don't duplicate
+      // Use functional updates to read latest state
+      setSettings(currentSettings => {
+        const lunchMs = (currentSettings.autoLunch !== false ? (currentSettings.lunchMinutes || 30) : 0) * 60000;
 
-        // Build 8:00 AM → 4:00 PM timestamps for today
-        const clockIn  = new Date(todayDate); clockIn.setHours(8, 0, 0, 0);
-        const clockOut = new Date(todayDate); clockOut.setHours(16, 0, 0, 0);
+        setShifts(currentShifts => {
+          const alreadyHasToday = currentShifts.some(sh => sameDay(sh.clockIn, todayDate));
+          if (alreadyHasToday) return currentShifts; // don't duplicate
 
-        const holidayShift = {
-          id: crypto.randomUUID(),
-          type: "regular",          // holiday pay at regular rate; OT only if physically clocked in
-          clockIn:  clockIn.getTime(),
-          clockOut: clockOut.getTime(),
-          lunchDuration: 0,
-          onLunch: false,
-          lunchStart: null,
-          note: `${holidayName} — auto holiday`,
-        };
+          // Clock-out = 8h + lunch so net is always exactly 8h regardless of
+          // auto-lunch setting. lunchDuration pre-filled so shiftNetMs skips it.
+          const clockIn  = new Date(todayDate); clockIn.setHours(8, 0, 0, 0);
+          const clockOut = new Date(todayDate);
+          clockOut.setTime(clockIn.getTime() + 8 * 3600000 + lunchMs);
 
-        const updated = [holidayShift, ...currentShifts].sort((a, b) => b.clockIn - a.clockIn);
+          const holidayShift = {
+            id: crypto.randomUUID(),
+            type: "regular",          // holiday pay at regular rate; OT only if physically clocked in
+            clockIn:  clockIn.getTime(),
+            clockOut: clockOut.getTime(),
+            lunchDuration: lunchMs,   // pre-fill so auto-deduction is a no-op
+            onLunch: false,
+            lunchStart: null,
+            note: `${holidayName} — auto holiday`,
+          };
 
-        // Persist with current settings (read from state via functional update)
-        setSettings(s => {
+          const updated = [holidayShift, ...currentShifts].sort((a, b) => b.clockIn - a.clockIn);
+
           appStorage.set(STORAGE_KEY, JSON.stringify({
             shifts: updated,
             active: null,
-            settings: s,
+            settings: currentSettings,
           })).catch(() => {});
-          return s; // unchanged
+
+          return updated;
         });
 
-        return updated;
+        return currentSettings; // settings unchanged
       });
     });
   }, []);
