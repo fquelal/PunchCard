@@ -1,103 +1,93 @@
 // ─────────────────────────────────────────────────────────────
-//  PunchCard
-//  Deploy this file as sw.js alongside index.html.
-//  To push an update: bump CACHE_VERSION and redeploy.
+//  PunchCard Service Worker
+//  Bump CACHE_VERSION on every deploy to force clients to update.
 // ─────────────────────────────────────────────────────────────
 
 const CACHE_VERSION = "1.3.5";
 const CACHE_NAME    = `punchcard-${CACHE_VERSION}`;
 
-// Only cache files you know exist on the server.
-// Do NOT include manifest.json unless you have actually created that file —
-// cache.add() will throw on a 404, which would have silently prevented the
-// entire app from being cached for offline use.
-const PRECACHE_ASSETS = [
+// Local assets — always pre-cached on install
+const LOCAL_ASSETS = [
   "/",
   "/index.html",
+  "/style.css",
+  "/script.js",
+  "/sw.js",
 ];
 
-// ── Install: pre-cache core assets ───────────────────────────
-// Uses Promise.allSettled so a single failed asset never blocks
-// the rest of the cache from being populated.
+// CDN assets — pre-cached on install so the app works fully offline
+const CDN_ASSETS = [
+  "https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js",
+  "https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js",
+  "https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js",
+  "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js",
+  "https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&family=Oswald:wght@400;600;700&display=swap",
+];
+
+// ── Install: pre-cache everything ────────────────────────────
 self.addEventListener("install", event => {
   console.log(`[SW] Installing v${CACHE_VERSION}`);
   event.waitUntil(
-    caches.open(CACHE_NAME)
-      .then(cache =>
-        Promise.allSettled(
-          PRECACHE_ASSETS.map(url =>
-            cache.add(url).catch(err =>
-              console.warn(`[SW] Could not pre-cache ${url}:`, err)
-            )
-          )
-        )
-      )
-      .then(() => {
-        console.log(`[SW] Pre-cache complete`);
-        // Take control of all open tabs immediately — no need for the user
-        // to close and reopen the app to get the new version.
-        return self.skipWaiting();
-      })
+    caches.open(CACHE_NAME).then(cache =>
+      Promise.allSettled([
+        // Local assets — same origin, no CORS issues
+        ...LOCAL_ASSETS.map(url =>
+          cache.add(url).catch(err => console.warn(`[SW] Could not cache ${url}:`, err))
+        ),
+        // CDN assets — fetch with no-cors so opaque responses are stored
+        ...CDN_ASSETS.map(url =>
+          fetch(url, { mode: "no-cors" })
+            .then(res => cache.put(url, res))
+            .catch(err => console.warn(`[SW] Could not cache CDN ${url}:`, err))
+        ),
+      ])
+    ).then(() => {
+      console.log(`[SW] Pre-cache complete`);
+      return self.skipWaiting();
+    })
   );
 });
 
-// ── Activate: clean up stale caches ──────────────────────────
+// ── Activate: delete old caches ──────────────────────────────
 self.addEventListener("activate", event => {
   console.log(`[SW] Activating v${CACHE_VERSION}`);
   event.waitUntil(
     caches.keys()
-      .then(keys =>
-        Promise.all(
-          keys
-            .filter(key => key.startsWith("punchcard-") && key !== CACHE_NAME)
-            .map(key => {
-              console.log(`[SW] Removing old cache: ${key}`);
-              return caches.delete(key);
-            })
-        )
-      )
+      .then(keys => Promise.all(
+        keys
+          .filter(k => k.startsWith("punchcard-") && k !== CACHE_NAME)
+          .map(k => { console.log(`[SW] Removing old cache: ${k}`); return caches.delete(k); })
+      ))
       .then(() => self.clients.claim())
   );
 });
 
-// ── Fetch: cache-first, network fallback ─────────────────────
-// Serves the cached version instantly when offline.
-// Any successful network response is saved to the cache so the
-// app stays up-to-date when the user IS online.
+// ── Fetch: cache-first for everything ────────────────────────
 self.addEventListener("fetch", event => {
   if (event.request.method !== "GET") return;
-  if (!event.request.url.startsWith(self.location.origin)) return;
 
   event.respondWith(
     caches.match(event.request).then(cached => {
       if (cached) {
-        // Serve from cache immediately, then refresh in the background
-        const networkRefresh = fetch(event.request)
-          .then(response => {
-            if (response && response.status === 200 && response.type !== "opaque") {
-              caches.open(CACHE_NAME).then(cache =>
-                cache.put(event.request, response.clone())
-              );
-            }
-            return response;
+        // Serve cache immediately; refresh in background when online
+        fetch(event.request, { mode: "no-cors" })
+          .then(res => {
+            if (res) caches.open(CACHE_NAME).then(c => c.put(event.request, res));
           })
           .catch(() => {});
-        // Return the cached version right away — don't wait for network
         return cached;
       }
 
-      // Not in cache — try network, cache the result
-      return fetch(event.request)
-        .then(response => {
-          if (!response || response.status !== 200 || response.type === "opaque") {
-            return response;
+      // Not cached yet — try network and cache result
+      return fetch(event.request, { mode: "no-cors" })
+        .then(res => {
+          if (res) {
+            caches.open(CACHE_NAME).then(c => c.put(event.request, res.clone()));
           }
-          const toCache = response.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(event.request, toCache));
-          return response;
+          return res;
         })
         .catch(() => {
-          // Fully offline and not cached — return index.html for navigation
+          // Fully offline and not cached — fall back to index.html for navigation
           if (event.request.mode === "navigate") {
             return caches.match("/index.html");
           }
@@ -106,7 +96,7 @@ self.addEventListener("fetch", event => {
   );
 });
 
-// ── Message: manual update trigger from the app UI ───────────
+// ── Message: manual skipWaiting trigger from app UI ──────────
 self.addEventListener("message", event => {
   if (event.data?.type === "SKIP_WAITING") {
     console.log("[SW] skipWaiting triggered by app");
