@@ -284,26 +284,21 @@ get netPay() { return this.gross - this.totalDeductions; },
 }
 
 // ── CSV Export ───────────────────────────────────────────────
-// ── Shared file-share helper ────────────────────────────────
-// iOS: uses Web Share API (files only, no title) and shows a toast.
-// Desktop: falls back to a plain <a download> click.
+// ── Shared file-share/download helper ───────────────────────
+// iOS Safari: invoke Web Share API with files only (no title property).
+// All other platforms: silent <a download> fallback.
 function shareOrDownload(blob, filename, showToast) {
 const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
 (navigator.platform === “MacIntel” && navigator.maxTouchPoints > 1);
 const file = new File([blob], filename, { type: blob.type });
-
 if (isIOS && navigator.canShare && navigator.canShare({ files: [file] })) {
 navigator.share({ files: [file] })
-.then(() => {})
-.catch(err => { if (err.name !== “AbortError”) console.warn(“Share error:”, err); });
-showToast(“Tap Share → Save to Files”);
+.catch(err => { if (err.name !== “AbortError”) console.warn(“Share:”, err); });
+if (showToast) showToast(“Tap Share → Save to Files”);
 } else {
-// Desktop fallback: download link
 const url = URL.createObjectURL(blob);
 const a   = document.createElement(“a”);
-a.href = url;
-a.download = filename;
-a.click();
+a.href = url; a.download = filename; a.click();
 URL.revokeObjectURL(url);
 }
 }
@@ -468,14 +463,12 @@ const loaded = useRef(false);
 const importFileRef = useRef(null);
 const [importStatus, setImportStatus] = useState(null);
 const [pendingDelete, setPendingDelete] = useState(null);
-const [infoToast, setInfoToast]     = useState(null); // { msg, timerId }
-const infoToastRef = useRef(null);
-
+const [infoToast, setInfoToast] = useState(null);
+const infoToastTimer = React.useRef(null);
 function showToast(msg) {
-if (infoToastRef.current) clearTimeout(infoToastRef.current);
-const id = setTimeout(() => setInfoToast(null), 3500);
-infoToastRef.current = id;
-setInfoToast({ msg, id });
+clearTimeout(infoToastTimer.current);
+setInfoToast(msg);
+infoToastTimer.current = setTimeout(() => setInfoToast(null), 3500);
 }
 const undoTimerRef  = useRef(null);
 const undoCountRef  = useRef(null);
@@ -594,56 +587,33 @@ setDismissedWarnings(fresh);
 loaded.current = true;
 }
 load().then(() => {
-// ── Holiday auto-shift ───────────────────────────────────
-// After loading, if today is a recognised NJ holiday and no shift
-// (or active punch) already exists for today, insert an 8-hour OT
-// shift automatically (8:00 AM – 4:00 PM).
 const todayDate = new Date();
 const holidayName = getNJHolidayName(todayDate.getTime());
 if (!holidayName) return;
-
-```
-  // Use functional updates to read latest state
-  setSettings(currentSettings => {
-    const lunchMs = (currentSettings.autoLunch !== false ? (currentSettings.lunchMinutes || 30) : 0) * 60000;
-
-    setShifts(currentShifts => {
-      const alreadyHasToday = currentShifts.some(sh => sameDay(sh.clockIn, todayDate));
-      if (alreadyHasToday) return currentShifts; // don't duplicate
-
-      // Clock-out = 8h + lunch so net is always exactly 8h regardless of
-      // auto-lunch setting. lunchDuration pre-filled so shiftNetMs skips it.
-      const clockIn  = new Date(todayDate); clockIn.setHours(8, 0, 0, 0);
-      const clockOut = new Date(todayDate);
-      clockOut.setTime(clockIn.getTime() + 8 * 3600000 + lunchMs);
-
-      const holidayShift = {
-        id: crypto.randomUUID(),
-        type: "regular",          // holiday pay at regular rate; OT only if physically clocked in
-        clockIn:  clockIn.getTime(),
-        clockOut: clockOut.getTime(),
-        lunchDuration: lunchMs,   // pre-fill so auto-deduction is a no-op
-        onLunch: false,
-        lunchStart: null,
-        note: `${holidayName} — auto holiday`,
-      };
-
-      const updated = [holidayShift, ...currentShifts].sort((a, b) => b.clockIn - a.clockIn);
-
-      appStorage.set(STORAGE_KEY, JSON.stringify({
-        shifts: updated,
-        active: null,
-        settings: currentSettings,
-      })).catch(() => {});
-
-      return updated;
-    });
-
-    return currentSettings; // settings unchanged
-  });
+setSettings(currentSettings => {
+const lunchMs = (currentSettings.autoLunch !== false ? (currentSettings.lunchMinutes || 30) : 0) * 60000;
+setShifts(currentShifts => {
+if (currentShifts.some(sh => sameDay(sh.clockIn, todayDate))) return currentShifts;
+const clockIn  = new Date(todayDate); clockIn.setHours(8, 0, 0, 0);
+const clockOut = new Date(todayDate);
+clockOut.setTime(clockIn.getTime() + 8 * 3600000 + lunchMs);
+const holidayShift = {
+id: crypto.randomUUID(),
+type: “regular”,
+clockIn: clockIn.getTime(),
+clockOut: clockOut.getTime(),
+lunchDuration: lunchMs,
+onLunch: false,
+lunchStart: null,
+note: `${holidayName} — auto holiday`,
+};
+const updated = [holidayShift, …currentShifts].sort((a, b) => b.clockIn - a.clockIn);
+appStorage.set(STORAGE_KEY, JSON.stringify({ shifts: updated, active: null, settings: currentSettings })).catch(() => {});
+return updated;
 });
-```
-
+return currentSettings;
+});
+});
 }, []);
 
 // Save
@@ -859,10 +829,10 @@ const ytdRows = [
 ];
 XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(ytdRows), "YTD Summary");
 
-const filename = `punchcard-export-${new Date().toISOString().slice(0,10)}.xlsx`;
+const xlsxName = `punchcard-export-${new Date().toISOString().slice(0,10)}.xlsx`;
 const wbout = XLSX.write(wb, { bookType: "xlsx", type: "array" });
-const blob  = new Blob([wbout], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-shareOrDownload(blob, filename, showToast);
+const xlsxBlob = new Blob([wbout], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+shareOrDownload(xlsxBlob, xlsxName, showToast);
 ```
 
 }
@@ -1981,7 +1951,7 @@ return (
           <>
             {[
               ["NJ overtime law",    "OT after 40h/week at 1.5× — rate derived from regular rate, not configurable"],
-              ["NJ holiday OT",      "8-hour shift (8 AM–4 PM) auto-inserted on the 6 company holidays at regular rate — clock in on a holiday to earn OT on top"],
+              ["NJ holiday OT",      "Clocking in on 6 company holidays auto-sets OT rate — see NJ Holidays list in settings"],
               ["Weekend OT",         "Clocking in on Saturday or Sunday also auto-applies OT rate"],
               ["Manual entry fix",   "Entries now save reliably; overnight shifts (out before in) handled automatically"],
               ["Manual holiday hint","Manual entry shows a ★ badge when the selected date is a holiday or weekend"],
@@ -2083,16 +2053,16 @@ return (
     )}
   </div>
 
-  {/* ── Info Toast (share / save prompt) ── */}
-  <div className={`undo-toast${infoToast ? " visible" : ""}`} style={{ bottom: "calc(100px + env(safe-area-inset-bottom))" }}>
-    <div style={{ background: "#1a1810", border: "1px solid #4a4020", borderRadius: 999, boxShadow: "0 8px 32px rgba(0,0,0,0.6)" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "11px 20px" }}>
-        <span style={{ fontSize: 13, color: "#d4b84a", letterSpacing: 1, fontFamily: "'Courier Prime', monospace" }}>
-          {infoToast?.msg}
-        </span>
+  {/* ── Info Toast ── */}
+  {infoToast && (
+    <div className="undo-toast visible" style={{ bottom: "calc(100px + env(safe-area-inset-bottom))" }}>
+      <div style={{ background: "#1a1810", border: "1px solid #4a4020", borderRadius: 999, boxShadow: "0 8px 32px rgba(0,0,0,0.6)" }}>
+        <div style={{ display: "flex", alignItems: "center", padding: "11px 20px" }}>
+          <span style={{ fontSize: 13, color: "#d4b84a", letterSpacing: 1, fontFamily: "'Courier Prime', monospace" }}>{infoToast}</span>
+        </div>
       </div>
     </div>
-  </div>
+  )}
 
   {/* ── Undo Toast ── */}
   <div className={`undo-toast${pendingDelete ? " visible" : ""}`}>
