@@ -24,7 +24,7 @@ const manifest = {
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.3.2";
+const APP_VERSION = "1.3.4";
 
 // ── Tab order
 const TABS = ["today", "week", "period", "log"];
@@ -1025,7 +1025,7 @@ function PunchCard() {
       <div
         onTouchStart={handleSwipeStart}
         onTouchEnd={handleSwipeEnd}
-        style={{ flex: 1, overflowY: "auto", padding: "24px 20px", paddingBottom: "calc(24px + env(safe-area-inset-bottom))", maxWidth: 540, width: "100%", margin: "0 auto" }}>
+        style={{ flex: 1, overflowY: "auto", padding: "12px 20px", paddingBottom: "calc(40px + env(safe-area-inset-bottom))", maxWidth: 540, width: "100%", margin: "0 auto" }}>
 
 
         {/* ══════════ TODAY TAB ══════════ */}
@@ -1045,11 +1045,11 @@ function PunchCard() {
             ))}
 
             {/* Live clock */}
-            <div style={{ textAlign: "center", marginBottom: 8 }}>
-              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: 5, color: "#b09060", textTransform: "uppercase", marginBottom: 6 }}>
+            <div style={{ textAlign: "center", marginBottom: 4 }}>
+              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 14, letterSpacing: 5, color: "#b09060", textTransform: "uppercase", marginBottom: 2 }}>
                 {now.toLocaleDateString("en-US", { weekday: "long" })}
               </div>
-              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 42, fontWeight: 400, letterSpacing: 3, color: "#f0ead8", lineHeight: 1 }}>
+              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 36, fontWeight: 400, letterSpacing: 3, color: "#f0ead8", lineHeight: 1 }}>
                 {timeStr}
               </div>
               {/* Day context — weekend always OT, weekdays show toggle selection */}
@@ -1059,9 +1059,9 @@ function PunchCard() {
 
 
             {/* Punch button */}
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", margin: "6px 0 28px" }}>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", margin: "4px 0 14px" }}>
               {active && (
-                <div style={{ marginBottom: 16, textAlign: "center" }}>
+                <div style={{ marginBottom: 10, textAlign: "center" }}>
                   {editingActiveClockIn ? (
                     <div style={{ display: "flex", gap: 8, alignItems: "center", justifyContent: "center", marginBottom: 6 }}>
                       <input type="datetime-local" className="time-input" style={{ width: "auto", fontSize: 15 }}
@@ -1094,7 +1094,7 @@ function PunchCard() {
               </button>
 
               {active && (
-                <div style={{ marginTop: 16, width: "100%", maxWidth: 280 }}>
+                <div style={{ marginTop: 8, width: "100%", maxWidth: 280 }}>
                   <input
                     className="note-input"
                     placeholder="Note (optional)…"
@@ -1106,13 +1106,13 @@ function PunchCard() {
 
               {/* Lunch — full-width below punch button, regular shifts only */}
               {active && active.type === "regular" && (
-                <div style={{ marginTop: 18, width: "100%", maxWidth: 280 }}>
+                <div style={{ marginTop: 10, width: "100%", maxWidth: 280 }}>
                   {!active.onLunch ? (
                     <>
                       <button
                         onClick={handleLunchStart}
                         style={{
-                          width: "100%", padding: "11px 0",
+                          width: "100%", padding: "8px 0",
                           background: "#1a1810",
                           border: "1px solid #3a3218",
                           color: "#7a6838",
@@ -1164,7 +1164,7 @@ function PunchCard() {
 
             {/* Earned this shift — dollar only, own hide button */}
             {active && (
-              <div style={{ background: "#221e10", border: `1px solid ${tickIsOT ? "#5c1a1a" : "#1a3d2a"}`, padding: "14px 16px", marginBottom: 10 }}>
+              <div style={{ background: "#221e10", border: `1px solid ${tickIsOT ? "#5c1a1a" : "#1a3d2a"}`, padding: "10px 14px", marginBottom: 6 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                   <div style={{ fontSize: 11, letterSpacing: 3, color: tickIsOT ? "#e07070" : "#5dba8a", textTransform: "uppercase" }}>
                     <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: tickIsOT ? "#e07070" : "#5dba8a", marginRight: 6, verticalAlign: "middle", animation: "pulse 1s infinite" }} />
@@ -1176,17 +1176,17 @@ function PunchCard() {
                     {hideEarned ? "show" : "hide"}
                   </button>
                 </div>
-                <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 40, fontWeight: 600, letterSpacing: 1, color: tickIsOT ? "#e07070" : "#d4b84a", lineHeight: 1 }}>
+                <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 32, fontWeight: 600, letterSpacing: 1, color: tickIsOT ? "#e07070" : "#d4b84a", lineHeight: 1 }}>
                   {hideEarned || privacyMode ? "——" : `$${tickEarned.toFixed(2)}`}
                 </div>
               </div>
             )}
 
             {/* Hours — compact side-by-side stat boxes */}
-            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
               {active && (
                 <div className="stat-box" style={{ flex: 1, padding: "10px 12px" }}>
-                  <div className="stat-num" style={{ color: "#f0ead8", fontSize: 22 }}>{fmtHrs(activeNetMs)}</div>
+                  <div className="stat-num" style={{ color: "#f0ead8", fontSize: 20 }}>{fmtHrs(activeNetMs)}</div>
                   <div className="stat-lbl">This shift</div>
                 </div>
               )}
@@ -1224,7 +1224,7 @@ function PunchCard() {
             )}
 
             {/* Manual entry */}
-            <div style={{ marginTop: 20 }}>
+            <div style={{ marginTop: 10 }}>
               {!showManualEntry ? (
                 <button className="action-btn" style={{ width: "100%", textAlign: "center", borderColor: "#3a3218", color: "#b09060", padding: "10px" }}
                   onClick={() => {
