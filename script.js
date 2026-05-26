@@ -333,7 +333,7 @@ const totalHrs = sorted.reduce((a, s) => a + shiftNetHrs(s, lunchMs), 0);
 const totalPay = sorted.reduce((a, s) => a + shiftPay(s, shifts, settings, lunchMs), 0);
 rows.push([“TOTAL”, “”, “”, “”, “”, totalHrs.toFixed(2), totalPay.toFixed(2), “”]);
 
-const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, \'\"\"\')}"` ).join(”,”)).join(”\n”);
+const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(”,”)).join(”\n”);
 const blob = new Blob([csv], { type: “text/csv” });
 shareOrDownload(blob, `timesheet-${new Date().toISOString().slice(0, 10)}.csv`, showToast);
 }
