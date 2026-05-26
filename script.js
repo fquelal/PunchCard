@@ -24,7 +24,7 @@ const manifest = {
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.3.4";
+const APP_VERSION = "1.3.5";
 
 // ── Tab order
 const TABS = ["today", "week", "period", "log"];
@@ -1025,7 +1025,7 @@ function PunchCard() {
       <div
         onTouchStart={handleSwipeStart}
         onTouchEnd={handleSwipeEnd}
-        style={{ flex: 1, overflowY: "auto", padding: "12px 20px", paddingBottom: "calc(40px + env(safe-area-inset-bottom))", maxWidth: 540, width: "100%", margin: "0 auto" }}>
+        style={{ flex: 1, overflowY: "auto", padding: active ? "12px 20px" : "24px 20px", paddingBottom: "calc(40px + env(safe-area-inset-bottom))", maxWidth: 540, width: "100%", margin: "0 auto" }}>
 
 
         {/* ══════════ TODAY TAB ══════════ */}
@@ -1045,11 +1045,11 @@ function PunchCard() {
             ))}
 
             {/* Live clock */}
-            <div style={{ textAlign: "center", marginBottom: 4 }}>
-              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 14, letterSpacing: 5, color: "#b09060", textTransform: "uppercase", marginBottom: 2 }}>
+            <div style={{ textAlign: "center", marginBottom: active ? 4 : 8 }}>
+              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: active ? 14 : 15, letterSpacing: 5, color: "#b09060", textTransform: "uppercase", marginBottom: active ? 2 : 6 }}>
                 {now.toLocaleDateString("en-US", { weekday: "long" })}
               </div>
-              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 36, fontWeight: 400, letterSpacing: 3, color: "#f0ead8", lineHeight: 1 }}>
+              <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: active ? 36 : 42, fontWeight: 400, letterSpacing: 3, color: "#f0ead8", lineHeight: 1 }}>
                 {timeStr}
               </div>
               {/* Day context — weekend always OT, weekdays show toggle selection */}
@@ -1059,7 +1059,7 @@ function PunchCard() {
 
 
             {/* Punch button */}
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", margin: "4px 0 14px" }}>
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", margin: active ? "4px 0 14px" : "6px 0 28px" }}>
               {active && (
                 <div style={{ marginBottom: 10, textAlign: "center" }}>
                   {editingActiveClockIn ? (
@@ -1106,7 +1106,7 @@ function PunchCard() {
 
               {/* Lunch — full-width below punch button, regular shifts only */}
               {active && active.type === "regular" && (
-                <div style={{ marginTop: 10, width: "100%", maxWidth: 280 }}>
+                <div style={{ marginTop: active ? 10 : 20, width: "100%", maxWidth: 280 }}>
                   {!active.onLunch ? (
                     <>
                       <button
@@ -1183,7 +1183,7 @@ function PunchCard() {
             )}
 
             {/* Hours — compact side-by-side stat boxes */}
-            <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: active ? 8 : 16 }}>
               {active && (
                 <div className="stat-box" style={{ flex: 1, padding: "10px 12px" }}>
                   <div className="stat-num" style={{ color: "#f0ead8", fontSize: 20 }}>{fmtHrs(activeNetMs)}</div>
