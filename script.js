@@ -24,7 +24,7 @@ const manifest = {
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.3.1";
+const APP_VERSION = "1.3.2";
 
 // ── Tab order
 const TABS = ["today", "week", "period", "log"];
@@ -285,14 +285,13 @@ function calcPaycheck(grossPeriod, filingStatus, preTaxPerPeriod) {
 
 // ── CSV Export ───────────────────────────────────────────────
 // ── shareOrDownload: iOS Web Share API, desktop <a download> fallback ──
-function shareOrDownload(blob, filename, showToast) {
+function shareOrDownload(blob, filename) {
   const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
                 (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
   const file = new File([blob], filename, { type: blob.type });
   if (isIOS && navigator.canShare && navigator.canShare({ files: [file] })) {
     navigator.share({ files: [file] })
       .catch(err => { if (err.name !== "AbortError") console.warn("share:", err); });
-    if (showToast) showToast("Tap Share → Save to Files");
   } else {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -301,7 +300,7 @@ function shareOrDownload(blob, filename, showToast) {
   }
 }
 
-function exportCSV(shifts, settings, showToast) {
+function exportCSV(shifts, settings) {
   const lunchMs = settings.autoLunch !== false ? (settings.lunchMinutes || 30) * 60000 : 0;
   const rows = [
     ["Date", "Day", "Type", "Clock In", "Clock Out", "Net Hours", "Gross Pay", "Note"],
@@ -328,7 +327,7 @@ function exportCSV(shifts, settings, showToast) {
 
   const csv = rows.map(r => r.map(c => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
   const blob = new Blob([csv], { type: "text/csv" });
-  shareOrDownload(blob, `timesheet-${new Date().toISOString().slice(0, 10)}.csv`, showToast);
+  shareOrDownload(blob, `timesheet-${new Date().toISOString().slice(0, 10)}.csv`);
 }
 
 // ── YTD helper ───────────────────────────────────────────────
@@ -461,13 +460,7 @@ function PunchCard() {
   const importFileRef = useRef(null);
   const [importStatus, setImportStatus] = useState(null);
   const [pendingDelete, setPendingDelete] = useState(null);
-  const [infoToast, setInfoToast] = useState(null);
-  const infoToastTimer = React.useRef(null);
-  function showToast(msg) {
-    clearTimeout(infoToastTimer.current);
-    setInfoToast(msg);
-    infoToastTimer.current = setTimeout(() => setInfoToast(null), 3500);
-  }
+
   const undoTimerRef  = useRef(null);
   const undoCountRef  = useRef(null);
 
@@ -741,7 +734,7 @@ function PunchCard() {
   function exportBackup() {
     const data = JSON.stringify({ version: APP_VERSION, shifts, settings, active }, null, 2);
     const blob = new Blob([data], { type: "application/json" });
-    shareOrDownload(blob, `punchcard-backup-${new Date().toISOString().slice(0,10)}.json`, showToast);
+    shareOrDownload(blob, `punchcard-backup-${new Date().toISOString().slice(0,10)}.json`);
   }
 
   function importBackup(file) {
@@ -842,7 +835,7 @@ function PunchCard() {
     const xlsxName = `punchcard-export-${new Date().toISOString().slice(0,10)}.xlsx`;
     const wbArray = XLSX.write(wb, { bookType: "xlsx", type: "array" });
     const xlsxBlob = new Blob([wbArray], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
-    shareOrDownload(xlsxBlob, xlsxName, showToast);
+    shareOrDownload(xlsxBlob, xlsxName);
   }
 
   function deleteShift(id) {
@@ -1813,7 +1806,7 @@ function PunchCard() {
                   {allWeekStarts.length > 0 ? `Week ${logWeekOffset + 1} of ${allWeekStarts.length}` : ""}
                 </div>
                 <button className="action-btn" style={{ borderColor: "#d4b84a", color: "#d4b84a" }}
-                  onClick={() => exportCSV(shifts, settings, showToast)}>
+                  onClick={() => exportCSV(shifts, settings)}>
                   ↓ Export CSV
                 </button>
               </div>
@@ -2058,17 +2051,6 @@ function PunchCard() {
           </div>
         )}
       </div>
-
-      {/* ── Info Toast ── */}
-      {infoToast && (
-        <div className="undo-toast visible" style={{ bottom: "calc(100px + env(safe-area-inset-bottom))" }}>
-          <div style={{ background: "#1a1810", border: "1px solid #4a4020", borderRadius: 999, boxShadow: "0 8px 32px rgba(0,0,0,0.6)" }}>
-            <div style={{ display: "flex", alignItems: "center", padding: "11px 20px" }}>
-              <span style={{ fontSize: 13, color: "#d4b84a", letterSpacing: 1, fontFamily: "'Courier Prime', monospace" }}>{infoToast}</span>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ── Undo Toast ── */}
       <div className={`undo-toast${pendingDelete ? " visible" : ""}`}>
