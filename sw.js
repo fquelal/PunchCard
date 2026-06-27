@@ -3,7 +3,7 @@
 //  Bump CACHE_VERSION on every deploy to force clients to update.
 // ─────────────────────────────────────────────────────────────
 
-const CACHE_VERSION = "1.4.2";
+const CACHE_VERSION = "1.4.3";
 const CACHE_NAME    = `punchcard-${CACHE_VERSION}`;
 
 // Local assets — always pre-cached on install
