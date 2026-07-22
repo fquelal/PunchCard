@@ -24,7 +24,7 @@ const manifest = {
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.4.7";
+const APP_VERSION = "1.4.9";
 
 // ── Tab order
 const TABS = ["today", "week", "period", "log"];
@@ -414,12 +414,12 @@ function getNJHolidays(year) {
     return new Date(d);
   }
   return [
-    { name: "New Year's Day",    date: obs(new Date(year, 0, 1)) },
-    { name: "Memorial Day",      date: lastWD(year, 4, 1) },
-    { name: "Independence Day",  date: obs(new Date(year, 6, 4)) },
-    { name: "Labor Day",         date: nthWD(year, 8, 1, 1) },
-    { name: "Thanksgiving Day",  date: nthWD(year, 10, 4, 4) },
-    { name: "Christmas Day",     date: obs(new Date(year, 11, 25)) },
+    { name: "New Year's Day",      date: obs(new Date(year, 0, 1)) },
+    { name: "Memorial Day",        date: lastWD(year, 4, 1) },
+    { name: "Juneteenth",          date: obs(new Date(year, 5, 19)) },
+    { name: "Independence Day",    date: obs(new Date(year, 6, 4)) },
+    { name: "Thanksgiving Day",    date: nthWD(year, 10, 4, 4) },
+    { name: "Christmas Day",       date: obs(new Date(year, 11, 25)) },
   ].sort((a, b) => a.date - b.date);
 }
 
@@ -2066,7 +2066,7 @@ function PunchCard() {
               <>
                 {[
                   ["NJ overtime law",    "OT after 40h/week at 1.5× — rate derived from regular rate, not configurable"],
-                  ["NJ holiday OT",      "Clocking in on 6 company holidays auto-sets OT rate — see NJ Holidays list in settings"],
+                  ["NJ holiday OT",      "Clocking in on 6 confirmed paid holidays auto-sets OT rate — see NJ Holidays list in settings"],
                   ["Weekend OT",         "Clocking in on Saturday or Sunday also auto-applies OT rate"],
                   ["Manual entry fix",   "Entries now save reliably; overnight shifts (out before in) handled automatically"],
                   ["Manual holiday hint","Manual entry shows a ★ badge when the selected date is a holiday or weekend"],
