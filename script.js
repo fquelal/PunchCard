@@ -24,7 +24,7 @@ const manifest = {
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.4.9";
+const APP_VERSION = "1.5.0";
 
 // ── Tab order
 const TABS = ["today", "week", "period", "log"];
@@ -102,7 +102,7 @@ function shiftNetHrs(shift, autoLunchMs) {
 }
 
 // Per-shift pay considering weekly context (NJ law: 40h/week)
-// Auto-holiday shifts are paid at regular rate but excluded from the 40h OT threshold,
+// Holiday shifts (auto-inserted OR clocked-in on a paid holiday) are paid at regular rate
 // matching how Paychex processes employer-paid holidays (Juneteenth, Memorial Day, etc.)
 function shiftPay(shift, allShifts, settings, lunchMs) {
   if (!shift.clockOut) return 0;
@@ -682,7 +682,7 @@ function PunchCard() {
     
     
     if (!active) {
-      const newActive = { id: crypto.randomUUID(), type: (isNJHoliday(ts) || new Date(ts).getDay() === 0 || new Date(ts).getDay() === 6) ? "oncall" : "regular", clockIn: ts, onLunch: false, lunchStart: null, lunchDuration: 0 };
+      const newActive = { id: crypto.randomUUID(), type: isNJHoliday(ts) ? "regular" : (new Date(ts).getDay() === 0 || new Date(ts).getDay() === 6) ? "oncall" : "regular", clockIn: ts, onLunch: false, lunchStart: null, lunchDuration: 0 };
       setActive(newActive);
       setFlash("in");
       setTimeout(() => setFlash(null), 800);
@@ -743,9 +743,10 @@ function PunchCard() {
     }
     // Handle overnight shifts: if out is before in, assume next calendar day
     if (outTs <= inTs) outTs += 24 * 3600000;
-    // Auto-detect holiday OT for the chosen date
-    const autoType = (isNJHoliday(inTs) || new Date(inTs).getDay() === 0 || new Date(inTs).getDay() === 6)
-      ? "oncall" : type;
+    // Holidays: regular rate. Weekends: oncall (OT) rate.
+    const autoType = isNJHoliday(inTs) ? "regular"
+      : (new Date(inTs).getDay() === 0 || new Date(inTs).getDay() === 6) ? "oncall"
+      : type;
     const shift = { id: crypto.randomUUID(), type: autoType, clockIn: inTs, clockOut: outTs,
                     lunchDuration: 0, onLunch: false, lunchStart: null, note: note.trim() };
     const updated = [shift, ...shifts].sort((a, b) => b.clockIn - a.clockIn);
@@ -974,7 +975,7 @@ function PunchCard() {
   // Holiday warning
   const todayHolidayName = getNJHolidayName(now.getTime());
   if (todayHolidayName && !dismissedWarnings[`holiday-${now.toDateString()}`]) {
-    warnings.push({ id: `holiday-${now.toDateString()}`, msg: `${todayHolidayName} — 8h auto-added at regular rate · clock in to earn OT`, color: "#d4b84a", bg: "#1a1400", border: "#8a7020" });
+    warnings.push({ id: `holiday-${now.toDateString()}`, msg: `${todayHolidayName} — paid holiday · shifts today at regular rate`, color: "#d4b84a", bg: "#1a1400", border: "#8a7020" });
   }
   const activeWarnings = warnings.filter(w => !dismissedWarnings[w.id]);
 
@@ -1316,7 +1317,7 @@ function PunchCard() {
                       onChange={e => { setManualEntry(p => ({ ...p, date: e.target.value })); setManualEntryError(null); }} />
                     {manualEntry.date && (isNJHoliday(new Date(manualEntry.date + "T12:00:00").getTime()) || [0,6].includes(new Date(manualEntry.date + "T12:00:00").getDay())) && (
                       <div style={{ fontSize: 11, color: "#d4b84a", letterSpacing: 1, marginTop: 5 }}>
-                        ★ {getNJHolidayName(new Date(manualEntry.date + "T12:00:00").getTime()) || "Weekend"} — OT rate will be applied
+                        {getNJHolidayName(new Date(manualEntry.date + "T12:00:00").getTime()) ? `★ ${getNJHolidayName(new Date(manualEntry.date + "T12:00:00").getTime())} — regular rate` : "★ Weekend — OT rate"}
                       </div>
                     )}
                   </div>
@@ -2066,7 +2067,7 @@ function PunchCard() {
               <>
                 {[
                   ["NJ overtime law",    "OT after 40h/week at 1.5× — rate derived from regular rate, not configurable"],
-                  ["NJ holiday OT",      "Clocking in on 6 confirmed paid holidays auto-sets OT rate — see NJ Holidays list in settings"],
+                  ["Holiday pay",        "Clocking in on a paid holiday uses regular rate — weekends still use OT rate"],
                   ["Weekend OT",         "Clocking in on Saturday or Sunday also auto-applies OT rate"],
                   ["Manual entry fix",   "Entries now save reliably; overnight shifts (out before in) handled automatically"],
                   ["Manual holiday hint","Manual entry shows a ★ badge when the selected date is a holiday or weekend"],
