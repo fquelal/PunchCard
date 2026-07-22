@@ -3,7 +3,7 @@
 //  Bump CACHE_VERSION on every deploy to force clients to update.
 // ─────────────────────────────────────────────────────────────
 
-const CACHE_VERSION = "1.4.9";
+const CACHE_VERSION = "1.5.0";
 const CACHE_NAME    = `punchcard-${CACHE_VERSION}`;
 
 const LOCAL_ASSETS = [
