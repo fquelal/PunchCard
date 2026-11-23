@@ -24,7 +24,7 @@ const manifest = {
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.7.3";
+const APP_VERSION = "1.7.5";
 
 // ── Tab order
 const TABS = ["today", "period", "log"];
@@ -655,7 +655,7 @@ function PunchCard() {
           const fresh = {};
           for (const [k, v] of Object.entries(stored)) {
             // Keep ytdOpen/otOpen (persistent UI prefs) and any key belonging to THIS week
-            if (k === "ytdOpen" || k === "otOpen" || k.includes(thisWeek)) fresh[k] = v;
+            if (k === "ytdOpen" || k === "otOpen" || k === "dailyOpen" || k.includes(thisWeek)) fresh[k] = v;
           }
           setDismissedWarnings(fresh);
         }
@@ -1633,7 +1633,93 @@ function PunchCard() {
                 );
               })()}
 
-              {/* ── YTD Earnings & Wage Base Caps (now below paycheck) ── */}
+              {/* ── Daily Breakdown — collapsible, sits under the pay card ── */}
+              {(() => {
+                const daysWorked = periodDays.filter(d => shifts.some(s => sameDay(s.clockIn, d))).length;
+                return (
+                  <div style={{ marginBottom: 20 }}>
+                    <button
+                      onClick={() => {
+                        const updated = { ...dismissedWarnings, dailyOpen: !dismissedWarnings.dailyOpen };
+                        setDismissedWarnings(updated);
+                        appStorage.set(DISMISS_KEY, JSON.stringify(updated)).catch(() => {});
+                      }}
+                      style={{ WebkitAppearance: "none", appearance: "none", width: "100%", background: "#221e10", border: "1px solid #3a3218", color: "#a09060", fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: 3, textTransform: "uppercase", padding: "11px 16px", cursor: "pointer", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}
+                    >
+                      <span>📅 Daily Breakdown</span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                        <span style={{ fontSize: 13, letterSpacing: 1, color: "#7a6838" }}>
+                          {daysWorked} day{daysWorked !== 1 ? "s" : ""} · {fmtHrs((totalRegHrs + totalOCHrs) * 3600000)}
+                        </span>
+                        <span>{dismissedWarnings.dailyOpen ? "▲" : "▼"}</span>
+                      </span>
+                    </button>
+                    {dismissedWarnings.dailyOpen && (
+                      <div style={{ background: "#0e0c07", border: "1px solid #3a3218", borderTop: "none", padding: "4px 16px 8px" }}>
+                        {dayRows}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              {/* ── FLSA Overtime Threshold (current pay-period week) — collapsible ── */}
+              {isCurrentPeriod && (
+                <div style={{ marginBottom: 20 }}>
+                  <button
+                    onClick={() => {
+                      const updated = { ...dismissedWarnings, otOpen: !dismissedWarnings.otOpen };
+                      setDismissedWarnings(updated);
+                      appStorage.set(DISMISS_KEY, JSON.stringify(updated)).catch(() => {});
+                    }}
+                    style={{ WebkitAppearance: "none", appearance: "none", width: "100%", background: "#221e10", border: "1px solid #3a3218", color: "#a09060", fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: 3, textTransform: "uppercase", padding: "11px 16px", cursor: "pointer", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}
+                  >
+                    <span>⏱ This Week's OT Threshold</span>
+                    <span style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                      <span style={{ fontSize: 13, letterSpacing: 1, color: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a" }}>
+                        {fmtHrs((weekPay.regHrs + weekPay.otHrs) * 3600000)} / 40h
+                      </span>
+                      <span>{dismissedWarnings.otOpen ? "▲" : "▼"}</span>
+                    </span>
+                  </button>
+                  {dismissedWarnings.otOpen && (
+                    <div style={{ background: "#0e0c07", border: "1px solid #3a3218", borderTop: "none", padding: "14px 16px" }}>
+                      <div style={{ fontSize: 13, color: "#8a7840", letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>
+                        {fmtDateShort(ws)} – {fmtDateShort(new Date(ws.getFullYear(), ws.getMonth(), ws.getDate() + 6))} · pay week
+                      </div>
+                      <div style={{ marginBottom: 10 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, letterSpacing: 1, marginBottom: 4 }}>
+                          <span style={{ color: "#b09060", textTransform: "uppercase", letterSpacing: 2 }}>FLSA Overtime Threshold</span>
+                          <span style={{ color: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a", fontFamily: "'Oswald', sans-serif", fontSize: 13 }}>
+                            {fmtHrs(weekPay.regHrs * 3600000)} + {fmtHrs(weekPay.otHrs * 3600000)} = {fmtHrs((weekPay.regHrs + weekPay.otHrs) * 3600000)} / 40h
+                          </span>
+                        </div>
+                        <div className="ot-bar-wrap">
+                          <div className="ot-bar" style={{ width: `${Math.min(100, ((weekPay.regHrs + weekPay.otHrs) / 40) * 100)}%`, background: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a" }} />
+                        </div>
+                      </div>
+                      <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
+                        <div className="stat-box">
+                          <div className="stat-num" style={{ color: "#5dba8a" }}>{fmtHrs(weekPay.regHrs * 3600000)}</div>
+                          <div className="stat-lbl">Week Regular</div>
+                        </div>
+                        <div className="stat-box">
+                          <div className="stat-num" style={{ color: "#e07070" }}>{fmtHrs(weekPay.otHrs * 3600000)}</div>
+                          <div className="stat-lbl">Week Overtime</div>
+                        </div>
+                      </div>
+                      <div className="stat-box">
+                        <div className="stat-num" style={{ color: "#d4b84a" }}>
+                          {fpay(weekPay.regHrs, settings.regularRate)} + {fpay(weekPay.otHrs, (settings.regularRate * 1.5))}
+                        </div>
+                        <div className="stat-lbl">Estimated Week Pay (Reg + Overtime)</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* ── YTD Earnings & Wage Base Caps (bottom of Pay Period tab) ── */}
               <div style={{ marginBottom: 20 }}>
                 <button
                   onClick={() => {
@@ -1692,65 +1778,6 @@ function PunchCard() {
                 )}
               </div>
 
-              {/* ── FLSA Overtime Threshold (current pay-period week) — collapsible ── */}
-              {isCurrentPeriod && (
-                <div style={{ marginBottom: 20 }}>
-                  <button
-                    onClick={() => {
-                      const updated = { ...dismissedWarnings, otOpen: !dismissedWarnings.otOpen };
-                      setDismissedWarnings(updated);
-                      appStorage.set(DISMISS_KEY, JSON.stringify(updated)).catch(() => {});
-                    }}
-                    style={{ WebkitAppearance: "none", appearance: "none", width: "100%", background: "#221e10", border: "1px solid #3a3218", color: "#a09060", fontFamily: "'Oswald', sans-serif", fontSize: 15, letterSpacing: 3, textTransform: "uppercase", padding: "11px 16px", cursor: "pointer", textAlign: "left", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}
-                  >
-                    <span>⏱ This Week's OT Threshold</span>
-                    <span style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
-                      <span style={{ fontSize: 13, letterSpacing: 1, color: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a" }}>
-                        {fmtHrs((weekPay.regHrs + weekPay.otHrs) * 3600000)} / 40h
-                      </span>
-                      <span>{dismissedWarnings.otOpen ? "▲" : "▼"}</span>
-                    </span>
-                  </button>
-                  {dismissedWarnings.otOpen && (
-                    <div style={{ background: "#0e0c07", border: "1px solid #3a3218", borderTop: "none", padding: "14px 16px" }}>
-                      <div style={{ fontSize: 13, color: "#8a7840", letterSpacing: 2, textTransform: "uppercase", marginBottom: 10 }}>
-                        {fmtDateShort(ws)} – {fmtDateShort(new Date(ws.getFullYear(), ws.getMonth(), ws.getDate() + 6))} · pay week
-                      </div>
-                      <div style={{ marginBottom: 10 }}>
-                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, letterSpacing: 1, marginBottom: 4 }}>
-                          <span style={{ color: "#b09060", textTransform: "uppercase", letterSpacing: 2 }}>FLSA Overtime Threshold</span>
-                          <span style={{ color: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a", fontFamily: "'Oswald', sans-serif", fontSize: 13 }}>
-                            {fmtHrs(weekPay.regHrs * 3600000)} + {fmtHrs(weekPay.otHrs * 3600000)} = {fmtHrs((weekPay.regHrs + weekPay.otHrs) * 3600000)} / 40h
-                          </span>
-                        </div>
-                        <div className="ot-bar-wrap">
-                          <div className="ot-bar" style={{ width: `${Math.min(100, ((weekPay.regHrs + weekPay.otHrs) / 40) * 100)}%`, background: otStatus === "over" ? "#e07070" : otStatus === "warn" ? "#d4b84a" : "#5dba8a" }} />
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-                        <div className="stat-box">
-                          <div className="stat-num" style={{ color: "#5dba8a" }}>{fmtHrs(weekPay.regHrs * 3600000)}</div>
-                          <div className="stat-lbl">Week Regular</div>
-                        </div>
-                        <div className="stat-box">
-                          <div className="stat-num" style={{ color: "#e07070" }}>{fmtHrs(weekPay.otHrs * 3600000)}</div>
-                          <div className="stat-lbl">Week Overtime</div>
-                        </div>
-                      </div>
-                      <div className="stat-box">
-                        <div className="stat-num" style={{ color: "#d4b84a" }}>
-                          {fpay(weekPay.regHrs, settings.regularRate)} + {fpay(weekPay.otHrs, (settings.regularRate * 1.5))}
-                        </div>
-                        <div className="stat-lbl">Estimated Week Pay (Reg + Overtime)</div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Day-by-day */}
-              <div style={{ fontSize: 13, letterSpacing: 3, color: "#8a7840", textTransform: "uppercase", marginBottom: 8 }}>Daily Breakdown</div>
-              {dayRows}
             </div>
           );
         })()}
