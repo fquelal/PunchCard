@@ -24,7 +24,7 @@ const manifest = {
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.7.1";
+const APP_VERSION = "1.7.3";
 
 // ── Tab order
 const TABS = ["today", "period", "log"];
@@ -1549,17 +1549,15 @@ function PunchCard() {
                   <div className="stat-lbl">Overtime Pay</div>
                 </div>
               </div>
-              <div className="stat-box" style={{ marginBottom: 20 }}>
-                <div className="stat-num" style={{ color: "#d4b84a" }}>{$p(fmtPay(totalPay, 1))}</div>
-                <div className="stat-lbl">Total Earned This Period</div>
-                {projectedPay !== null && projectedPay > totalPay && (
-                  <div style={{ fontSize: 14, color: "#b09060", marginTop: 6 }}>
-                    Projected: ~{$p(fmtPay(projectedPay, 1))} based on {workdaysSoFar} workday{workdaysSoFar !== 1 ? "s" : ""} so far
-                  </div>
-                )}
-              </div>
+              {/* Nothing earned yet — simple gross card; once pay exists the combined card below takes over */}
+              {totalPay <= 0 && (
+                <div className="stat-box" style={{ marginBottom: 20 }}>
+                  <div className="stat-num" style={{ color: "#d4b84a" }}>{$p(fmtPay(0, 1))}</div>
+                  <div className="stat-lbl">Earned This Period</div>
+                </div>
+              )}
 
-              {/* ── Est. Net Pay Card (now above YTD) ── */}
+              {/* ── Combined Pay Card: gross + est. net + projection (tap for breakdown) ── */}
               {totalPay > 0 && (() => {
                 const pc     = calcPaycheck(totalPay, settings.filingStatus || "single", totalPreTax(settings));
                 const projPc = projectedPay ? calcPaycheck(projectedPay, settings.filingStatus || "single", totalPreTax(settings)) : null;
@@ -1578,20 +1576,25 @@ function PunchCard() {
                     >
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                         <div>
-                          <div style={{ fontSize: 11, letterSpacing: 3, color: "#5a7a5a", textTransform: "uppercase", marginBottom: 5 }}>Est. Net Pay</div>
+                          <div style={{ fontSize: 11, letterSpacing: 3, color: "#5a7a5a", textTransform: "uppercase", marginBottom: 5 }}>Est. Take-Home This Period</div>
                           <div style={{ fontFamily: "'Oswald', sans-serif", fontSize: 34, fontWeight: 600, color: "#5dba8a", lineHeight: 1 }}>
                             {$p(fmtPay(Math.max(0, pc.netPay), 1))}
-                          </div>
-                          <div style={{ fontSize: 12, color: "#4a6a4a", letterSpacing: 1, marginTop: 5 }}>
-                            After taxes & deductions · {pc.gross > 0 ? ((pc.totalDeductions - pc.preTax) / pc.gross * 100).toFixed(1) : 0}% rate
                           </div>
                         </div>
                         <div style={{ fontSize: 14, color: "#4a4020", marginTop: 2 }}>{showPaystub ? "▲" : "▼"}</div>
                       </div>
+                      {/* Gross → net in one line */}
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 10px", marginTop: 8, fontSize: 13, letterSpacing: 1 }}>
+                        <span style={{ color: "#d4b84a" }}>Gross {$p(fmtPay(pc.gross, 1))}</span>
+                        <span style={{ color: "#8a5a4a" }}>− {$p(fmtPay(Math.max(0, pc.gross - pc.netPay), 1))} taxes & deductions</span>
+                      </div>
                       {projPc && projPc.gross > pc.gross && (
-                        <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #2a2510", display: "flex", justifyContent: "space-between", fontSize: 13, color: "#6a7840" }}>
-                          <span style={{ letterSpacing: 1 }}>Projected full period</span>
-                          <span>~{$p(fmtPay(Math.max(0, projPc.netPay), 1))}</span>
+                        <div style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid #2a2510", display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, fontSize: 13, color: "#6a7840" }}>
+                          <span style={{ letterSpacing: 1 }}>Projected full period<span style={{ color: "#4a5030" }}> · {workdaysSoFar} workday{workdaysSoFar !== 1 ? "s" : ""} so far</span></span>
+                          <span style={{ textAlign: "right", whiteSpace: "nowrap" }}>
+                            ~{$p(fmtPay(Math.max(0, projPc.netPay), 1))}
+                            <span style={{ display: "block", fontSize: 11, color: "#7a6838" }}>~{$p(fmtPay(projPc.gross, 1))} gross</span>
+                          </span>
                         </div>
                       )}
                     </button>
@@ -1613,6 +1616,10 @@ function PunchCard() {
                         {row("NJ SDI (0.42%)", -pc.njSDI, "#c06050")}
                         {row("NJ FLI (0.0425%)", -pc.njFLI, "#c06050")}
                         {row("NJ SUI/WF (0.38%)", -pc.njSUI, "#c06050")}
+                        {/* Rates — share of gross going to taxes, and to everything combined */}
+                        <div style={{ fontSize: 12, letterSpacing: 2, color: "#8a7840", textTransform: "uppercase", padding: "10px 0 4px" }}>Rates</div>
+                        {row("Effective Tax Rate", `${pc.gross > 0 ? ((pc.totalDeductions - pc.preTax) / pc.gross * 100).toFixed(1) : "0.0"}%`, "#e07070")}
+                        {pc.preTax > 0 && row("Total Withheld (incl. pre-tax)", `${pc.gross > 0 ? (pc.totalDeductions / pc.gross * 100).toFixed(1) : "0.0"}%`, "#e07070")}
                         <div style={{ borderTop: "2px solid #3a3218", marginTop: 4, padding: "10px 0 6px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                           <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 13, letterSpacing: 3, color: "#5dba8a", textTransform: "uppercase" }}>Est. Net Pay</span>
                           <span style={{ fontFamily: "'Oswald', sans-serif", fontSize: 24, color: "#5dba8a", fontWeight: 700 }}>{$p(fmtPay(Math.max(0, pc.netPay), 1))}</span>
