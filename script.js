@@ -2,6 +2,29 @@
 const _cw = console.warn.bind(console);
     console.warn = (...a) => { if (typeof a[0] === 'string' && a[0].includes('Babel transformer')) return; _cw(...a); };
 
+// ── Block 1b: Lock zoom (pinch, double-tap, input-focus) ────
+// Runs before React mounts. Sets the viewport here so index.html doesn't need editing.
+(function () {
+  const content = "width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover";
+  let vp = document.querySelector('meta[name="viewport"]');
+  if (!vp) { vp = document.createElement("meta"); vp.name = "viewport"; document.head.appendChild(vp); }
+  vp.setAttribute("content", content);
+
+  // touch-action: no double-tap zoom on controls; pan-only on the page (blocks pinch where supported)
+  const st = document.createElement("style");
+  st.textContent =
+    "html, body { touch-action: pan-x pan-y; -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }" +
+    "button, input, select, textarea, a { touch-action: manipulation; }";
+  document.head.appendChild(st);
+
+  // iOS Safari / home-screen app ignore user-scalable=no for pinch, so block the gesture directly
+  ["gesturestart", "gesturechange", "gestureend"].forEach(t =>
+    document.addEventListener(t, e => e.preventDefault(), { passive: false }));
+  document.addEventListener("touchmove", e => {
+    if (e.touches.length > 1 || (e.scale !== undefined && e.scale !== 1)) e.preventDefault();
+  }, { passive: false });
+})();
+
 // ── Block 2: PWA Manifest injection ─────────────────────────
 (function() {
 const manifest = {
@@ -24,7 +47,7 @@ const manifest = {
 const { useState, useEffect, useRef, useMemo } = React;
 
 // ── Version ───────────────────────────────────────────────────
-const APP_VERSION = "1.7.5";
+const APP_VERSION = "1.7.6";
 
 // ── Tab order
 const TABS = ["today", "period", "log"];

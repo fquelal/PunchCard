@@ -4,7 +4,7 @@
 //  To push an update: bump CACHE_VERSION and redeploy.
 // ─────────────────────────────────────────────────────────────
 
-const CACHE_VERSION = "1.7.5";
+const CACHE_VERSION = "1.7.6";
 const CACHE_NAME    = `punchcard-${CACHE_VERSION}`;
 
 // Only cache files you know exist on the server.
